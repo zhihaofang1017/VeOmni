@@ -573,7 +573,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
                     use_cache,
                     cache_position,
                     position_embeddings,
-                    **flash_attn_kwargs
+                    **flash_attn_kwargs,
                 )
             else:
                 layer_outputs = decoder_layer(
