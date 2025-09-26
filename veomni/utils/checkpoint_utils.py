@@ -46,9 +46,8 @@ def _validate_dcp_checkpoint_entry(checkpoints_dir: str, entry: str):
     if not isdir(checkpoint_path):
         return None
 
-    model_metadata_path = os.path.join(checkpoint_path, "model/.metadata")
-    optim_metadata_path = os.path.join(checkpoint_path, "optimizer/.metadata")
-    if not exists(model_metadata_path) or not exists(optim_metadata_path):
+    metadata_path = os.path.join(checkpoint_path, ".metadata")
+    if not exists(metadata_path):
         return None
 
     return step
