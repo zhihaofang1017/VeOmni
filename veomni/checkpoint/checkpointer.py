@@ -293,7 +293,7 @@ class DistributedCheckpointer(CheckpointerBase):
     Distributed checkpointer for torch.distributed.checkpoint
     """
 
-    save_model_future: Optional[Any] = None
+    dcp_save_future: Optional[Any] = None
     # Dedicated process group for async saves (created on first use)
     _async_process_group: Optional[Any] = None
 
@@ -331,12 +331,12 @@ class DistributedCheckpointer(CheckpointerBase):
             if cls._async_process_group is None:
                 cls._async_process_group = dist.new_group(backend="gloo")
 
-            if cls.save_model_future is not None:
+            if cls.dcp_save_future is not None:
                 logger.info_rank0("waiting for previous DCP saving session to end...")
-                cls.save_model_future.result()
-                cls.save_model_future = None
+                cls.dcp_save_future.result()
+                cls.dcp_save_future = None
 
-            cls.save_model_future = dcp.async_save(
+            cls.dcp_save_future = dcp.async_save(
                 state_dict=save_state,
                 storage_writer=FileSystemWriter(
                     checkpoint_dir,
