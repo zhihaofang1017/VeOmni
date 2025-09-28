@@ -319,6 +319,16 @@ class DistributedCheckpointer(CheckpointerBase):
         checkpoint_dir = f"{path}/{_GLOBAL_STEP_PREFIX}{global_steps}" if global_steps else path
         os.makedirs(checkpoint_dir, exist_ok=True)
 
+        # saving extra_state first to gurantee that every saved model/optimizer ckpts have their extra_state saved before them
+        if "extra_state" in state:
+            extra_state_dir = os.path.join(checkpoint_dir, _EXTRA_STATE_DIR)
+            os.makedirs(extra_state_dir, exist_ok=True)
+            extra_state_path = os.path.join(extra_state_dir, _EXTRA_STATE_FORMAT.format(dist.get_rank()))
+            torch.save(
+                state["extra_state"],
+                extra_state_path,
+            )
+
         if "model" not in state:
             raise ValueError("Model must be provided to save a distributed checkpoint.")
 
@@ -332,9 +342,11 @@ class DistributedCheckpointer(CheckpointerBase):
                 cls._async_process_group = dist.new_group(backend="gloo")
 
             if cls.dcp_save_future is not None:
-                logger.info_rank0("waiting for previous DCP saving session to end...")
+                logger.info(f"[RANK {dist.get_rank()}] waiting for previous DCP saving session to end...")
                 cls.dcp_save_future.result()
                 cls.dcp_save_future = None
+                # block until all the ranks resolve their previous dcp async saving
+                dist.barrier()
 
             cls.dcp_save_future = dcp.async_save(
                 state_dict=save_state,
@@ -355,15 +367,6 @@ class DistributedCheckpointer(CheckpointerBase):
                     single_file_per_rank=True,
                     sync_files=False,
                 ),
-            )
-
-        if "extra_state" in state:
-            extra_state_dir = os.path.join(checkpoint_dir, _EXTRA_STATE_DIR)
-            os.makedirs(extra_state_dir, exist_ok=True)
-            extra_state_path = os.path.join(extra_state_dir, _EXTRA_STATE_FORMAT.format(dist.get_rank()))
-            torch.save(
-                state["extra_state"],
-                extra_state_path,
             )
 
         logger.info_rank0(f"Saved checkpoint to {checkpoint_dir}")
