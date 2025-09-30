@@ -21,8 +21,6 @@ import torch
 import torch.nn as nn
 from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_optimizer_state_dict,
     set_optimizer_state_dict,
 )
 from torch.distributed.checkpoint.stateful import Stateful
@@ -163,34 +161,76 @@ class MultiOptimizer(Optimizer, Stateful):
         self.optimizers_dict = optimizers
         self._is_multi_optimizer: bool = True
         self.key_names = key_names
+        # in case any user wants to use optim.state or optim.param_groups
+        self.state = self.get_state()
+        self.param_groups = self.get_param_groups()
 
-    def step(self) -> None:
+    def step(self, closure=None) -> None:
         for opt in self.optimizers_dict.values():
-            opt.step()
+            if closure is not None:
+                opt.step(closure=closure)
+            else:
+                opt.step()
 
-    def zero_grad(self) -> None:
+    def zero_grad(self, set_to_none=False) -> None:
         for opt in self.optimizers_dict.values():
-            opt.zero_grad()
+            if set_to_none:
+                opt.zero_grad(set_to_none)
+            else:
+                opt.zero_grad()
 
     def state_dict(
         self,
     ) -> Dict[str, Any]:
         # get the flatten state dict for multi-optimizer
-        merged: Dict[str, Any] = {}
-        for name in self.key_names:
-            opt = self.optimizers_dict.get(name)
-            sd = get_optimizer_state_dict(self.model, opt, options=StateDictOptions(flatten_optimizer_state_dict=True))
-            # check for key clashes before merging
-            overlap = set(merged.keys()) & set(sd.keys())
-            if overlap:
-                raise KeyError(
-                    f"Key clash detected while merging state dict for optimizer '{name}': {', '.join(sorted(overlap))}"
-                )
-            else:
-                logger.info_rank0("No clashes when merging MultiOptimizer state dicts")
-            merged.update(sd)
+        merged: Dict[str, Any] = {"state": self.state, "param_groups": self.param_groups}
+        # for name in self.key_names:
+        #     opt = self.optimizers_dict.get(name)
+        #     sd = get_optimizer_state_dict(self.model, opt, options=StateDictOptions(flatten_optimizer_state_dict=True))
+        #     # check for key clashes before merging
+        #     overlap = set(merged.keys()) & set(sd.keys())
+        #     if overlap:
+        #         raise KeyError(
+        #             f"Key clash detected while merging state dict for optimizer '{name}': {', '.join(sorted(overlap))}"
+        #         )
+        #     else:
+        #         logger.info_rank0("No clashes when merging MultiOptimizer state dicts")
+        #     merged.update(sd)
 
         return merged
+
+    def get_state(self):
+        # get the merged states of sub-optimizers
+        merged_state: Dict[str, Any] = {}
+        for name in self.key_names:
+            opt = self.optimizers_dict.get(name)
+            sd = opt.state
+            # check for key clashes before merging
+            overlap = set(merged_state.keys()) & set(sd.keys())
+            if overlap:
+                raise KeyError(
+                    f"Key clash detected while merging optim.state for optimizer '{name}': {', '.join(sorted(overlap))}"
+                )
+            else:
+                logger.info_rank0("No clashes when merging optim.state!")
+            merged_state.update(sd)
+
+        return merged_state
+
+    def get_param_groups(self):
+        # get the param_groups of sub-optimizers
+        merged_pg: list[dict[str, Any]] = []
+        for name in self.key_names:
+            opt = self.optimizers_dict.get(name)
+            pg = opt.param_groups
+            merged_pg.extend(pg)
+
+        return merged_pg
+
+    def init_state(self):
+        for name in self.key_names:
+            opt = self.optimizers_dict.get(name)
+            opt.init_state()
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         # Feed the same merged flattened dict to each sub-optimizer; PyTorch will
@@ -201,7 +241,7 @@ class MultiOptimizer(Optimizer, Stateful):
                 self.model,
                 opt,
                 optim_state_dict=state_dict,
-                options=StateDictOptions(flatten_optimizer_state_dict=True),
+                # options=StateDictOptions(flatten_optimizer_state_dict=True),
             )
 
     def register_step_pre_hook(self, hook):
