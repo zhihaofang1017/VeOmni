@@ -41,7 +41,7 @@ def flash_attention_forward(
     sliding_window: Optional[int] = None,
     softcap: Optional[float] = None,
     implementation: Optional[Literal["fa2", "lego", "fa3"]] = None,
-    skip_ulysses: bool = False, # Skip ulysses for some ViT cases like internvl3.5
+    skip_ulysses: bool = False,  # Skip ulysses for some ViT cases like internvl3.5
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
     if kwargs.get("output_attentions", False) or kwargs.get("head_mask", None) is not None:
