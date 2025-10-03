@@ -383,6 +383,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Enable full determinism."},
     )
+    no_cuda_launch_blocking: bool = field(
+        default=True,
+        metadata={"help": "Prevent CUDA_LAUNCH_BLOCKING from being accidentally enabled."},
+    )
     empty_cache_steps: int = field(
         default=500,
         metadata={"help": "Number of steps between two empty cache operations."},
@@ -630,6 +634,16 @@ class TrainingArguments:
                 self.profile_this_rank = True
         else:
             self.profile_this_rank = False
+
+        # Prevent CUDA_LAUNCH_BLOCKING from being accidentally enabled
+        if self.no_cuda_launch_blocking:
+            assert not self.enable_full_determinism, (
+                "no_cuda_launch_blocking and enable_full_determinism are enabled at the same time. But enable_full_determinism would set CUDA_LUANCH_BLOCKING to 1!"
+            )
+            cuda_launch_blocking_val = os.environ.get("CUDA_LAUNCH_BLOCKING", "").strip()
+            assert cuda_launch_blocking_val != "1", (
+                "CUDA_LAUNCH_BLOCKING=1 is set when no_cuda_launch_blocking is also enabled!"
+            )
 
     def compute_train_steps(
         self, max_seq_len: Optional[int] = None, train_size: Optional[int] = None, dataset_length: Optional[int] = None
