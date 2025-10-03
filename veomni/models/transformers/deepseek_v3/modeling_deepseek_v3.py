@@ -27,6 +27,16 @@ from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import check_model_inputs
 
 from ....ops import causallm_loss_function, fused_moe_forward
+from ....utils import logging
+from ....utils.import_utils import is_liger_kernel_available
+
+
+if is_liger_kernel_available():
+    from liger_kernel.ops.swiglu import LigerSiLUMulFunction
+    from liger_kernel.transformers.rms_norm import LigerRMSNorm
+    from liger_kernel.transformers.rope import liger_rotary_pos_emb
+
+logger = logging.get_logger(__name__)
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -98,7 +108,11 @@ class DeepseekV3MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        # Modification: use LigerSiLU
+        if is_liger_kernel_available():
+            return self.down_proj(LigerSiLUMulFunction.apply(self.gate_proj(x), self.up_proj(x)))
+        else:
+            down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
 
@@ -158,7 +172,7 @@ class DeepseekV3FusedMoe(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.num_experts = config.num_experts
+        self.num_experts = config.n_routed_experts
         self.hidden_dim = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
 
@@ -562,6 +576,12 @@ class DeepseekV3PreTrainedModel(PreTrainedModel):
         if isinstance(module, DeepseekV3TopkRouter):
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
 
+    # Modification: patch DeepSeekV3's parallel_plan in VeOmni
+    def get_parallel_plan(self):
+        from .parallel_plan import get_paralle_plan
+
+        return get_paralle_plan()
+
 
 @auto_docstring
 class DeepseekV3Model(DeepseekV3PreTrainedModel):
@@ -731,6 +751,14 @@ class DeepseekV3ForSequenceClassification(GenericForSequenceClassification, Deep
 class DeepseekV3ForTokenClassification(GenericForTokenClassification, DeepseekV3PreTrainedModel):
     pass
 
+
+# Modification: use LigerRMSNorm
+if is_liger_kernel_available():
+    apply_rotary_pos_emb = liger_rotary_pos_emb
+    DeepseekV3RMSNorm = LigerRMSNorm
+    logger.info_rank0("Apply liger kernel to DeepSeekV3")
+
+ModelClass = DeepseekV3ForCausalLM
 
 __all__ = [
     "DeepseekV3PreTrainedModel",
