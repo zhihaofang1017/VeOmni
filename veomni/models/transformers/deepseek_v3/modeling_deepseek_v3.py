@@ -1,5 +1,11 @@
-# Copied from https://github.com/huggingface/transformers/blob/41e5abac5cb49983a08ddef3e8645d6efd23c8f3/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py
-# v4.56.2
+# Based HuggingFace Transformers 4.57.0
+# Modification summary:
+# 1. DeepSeekV3FusedMoe as a replacement to DeepSeekV3NaiveMoe for DeepSeekV3MoE Experts module
+# 2. Patch DeepSeekV3RMSNorm -> LigerRMSNorm
+# 3. Use LigerSiLUMulFunction in DeepSeekV3MLP
+# 4. Use causallm_loss_function to compute loss and logits in DeepseekV3ForCausalLM
+# 5. Patch apply_rotary_pos_emb -> liger_rotary_pos_emb
+
 import math
 from typing import Callable, Optional, Union
 
