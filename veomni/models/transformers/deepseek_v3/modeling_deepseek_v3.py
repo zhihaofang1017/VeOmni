@@ -171,9 +171,10 @@ class DeepseekV3NaiveMoe(nn.ModuleList):
         return final_hidden_states
 
 
+# Modification: add fused MoE Implementation
 class DeepseekV3FusedMoe(nn.Module):
     """
-    Fused MoE
+    Fused MoE, need to merge the expert weights: https://github.com/ByteDance-Seed/VeOmni/blob/main/scripts/moe_ckpt_merge/moe_merge.py
     """
 
     def __init__(self, config):
@@ -202,7 +203,7 @@ class DeepseekV3FusedMoe(nn.Module):
             module=self,
             num_experts=self.num_experts,
             routing_weights=top_k_weights,
-            selected_experts=top_k_weights,
+            selected_experts=top_k_index,
             hidden_states=hidden_states,
             fc1_1_weight=self.gate_proj,
             fc1_2_weight=self.up_proj,
