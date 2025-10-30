@@ -198,7 +198,7 @@ class VeomniFlopsCounter:
         seqlen_square_sum = 0
         for seqlen in batch_seqlens:
             seqlen_square_sum += seqlen * seqlen
-        attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers * 0.5
+        attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * num_hidden_layers
 
         # all_layer & all_token fwd & bwk flops
         flops_all_token = dense_N_flops + attn_qkv_flops
