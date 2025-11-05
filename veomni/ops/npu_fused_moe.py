@@ -1,13 +1,8 @@
 import torch
 import torch_npu
-from mindspeed.ops import gmm
-# from ttx_kernels.transformers.inference import ttx_moe_gather, ttx_moe_scatter
-from ..distributed.moe import preprocess, token_pre_all2all, tokens_post_all2all
-from ..distributed.parallel_state import get_parallel_state
-from mindspeed.ops.npu_moe_token_unpermute import npu_moe_token_unpermute
-from mindspeed.ops.npu_moe_token_permute import npu_moe_token_permute
 from mindspeed.core.fusions.grouped_matmul import Ops
-
+from mindspeed.ops.npu_moe_token_permute import npu_moe_token_permute
+from mindspeed.ops.npu_moe_token_unpermute import npu_moe_token_unpermute
 
 
 def npu_group_gemm(x: torch.Tensor, weights: torch.Tensor, split_sizes: torch.Tensor) -> torch.Tensor:
@@ -26,7 +21,7 @@ def npu_fused_moe_forward(
     fc1_2_weight,
     fc2_weight,
 ):
-    # permute 
+    # permute
     permuted_hidden_states, row_ids_map = npu_moe_token_permute(hidden_states, selected_experts.to(torch.int32))
     tokens_per_expert = torch.histc(selected_experts, bins=num_experts, min=0, max=num_experts)
     tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
@@ -40,5 +35,4 @@ def npu_fused_moe_forward(
 
     # unpermute
     output = npu_moe_token_unpermute(fc2_out, row_ids_map, probs=routing_weights)
-    return output 
-
+    return output

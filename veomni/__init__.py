@@ -11,14 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .utils.import_utils import (
-    is_veomni_patch_available,
-)
-from .utils.logging import get_logger
-import torch
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as get_version
+
+import torch
 from packaging.version import parse as parse_version
+
+from .utils.import_utils import is_torch_npu_available, is_veomni_patch_available
+from .utils.logging import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -37,19 +38,8 @@ _safe_apply_patches()
 
 __version__ = "v0.1.0"
 
-
-def is_torch_npu_available() -> bool:
-    """Check the availability of NPU"""
-    try:
-        import torch_npu  # noqa: F401
-        return torch.npu.is_available()
-    except ImportError:
-        return False
-    
-    
 is_npu_available = is_torch_npu_available()
 if is_npu_available:
-    from .models.transformers import npu_patch as npu_patch
     package_name = "transformers"
     required_version_spec = "4.50.4"
     try:
@@ -61,6 +51,7 @@ if is_npu_available:
                 f"{package_name} version >= {required_version_spec} is required on ASCEND NPU, current version is "
                 f"{installed}."
             )
+        from .models.transformers import npu_patch as npu_patch
     except PackageNotFoundError as e:
         raise ImportError(
             f"package {package_name} is not installed, please run pip install {package_name}=={required_version_spec}"

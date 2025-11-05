@@ -16,18 +16,23 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
-from torch_npu import npu_rotary_mul as apply_rotary_emb
+
 from .qwen3_moe import modeling_qwen3_moe
+
 
 # This api can improve performance on ASCEND NPU
 def rms_norm_forward(self, x):
     return torch_npu.npu_rms_norm(x, self.weight, epsilon=self.variance_epsilon)[0]
+
+
 def apply_rotary_pos_emb_qwen3_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = torch_npu.npu_rotary_mul(q, cos, sin)
     k_embed = torch_npu.npu_rotary_mul(k, cos, sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
+
+
 class GmmFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, group_list, split_size):
@@ -36,6 +41,7 @@ class GmmFunction(torch.autograd.Function):
         ctx.split_size = split_size
         outputs = torch_npu.npu_grouped_matmul([x], [weight], group_list=group_list, group_type=0, split_item=2)
         return outputs[0]
+
     @staticmethod
     def backward(ctx, grad_outputs):
         x, weight = ctx.saved_tensors
@@ -51,7 +57,7 @@ class GmmFunction(torch.autograd.Function):
             dw = torch.stack([torch.matmul(xt_list[i], grad_outputs_list[i]) for i in range(len(xt_list))])
         return dx[0], dw, None, None
 
-        
+
 def moe_block_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
     """ """
     batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -108,6 +114,7 @@ def moe_block_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
     unpermuted_tokens = unpermuted_tokens.sum(dim=1).to(hidden_states.dtype)
     final_hidden_states = unpermuted_tokens
     return final_hidden_states, router_logits
+
 
 modeling_qwen3_moe.Qwen3MoeRMSNorm.forward = rms_norm_forward
 modeling_qwen3_moe.Qwen3MoeSparseMoeBlock.forward = moe_block_forward
