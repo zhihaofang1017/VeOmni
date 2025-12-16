@@ -13,13 +13,12 @@
 # limitations under the License.
 
 
+import functools
 import os
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Union
 
 import torch
 from transformers import (
-    AutoConfig,
-    AutoProcessor,
     AutoTokenizer,
     PretrainedConfig,
     PreTrainedModel,
@@ -27,7 +26,8 @@ from transformers import (
 
 from ..distributed.parallel_state import get_parallel_state
 from ..utils import logging
-from .loader import BaseModelLoader, get_loader
+from ..utils.device import is_torch_npu_available
+from .loader import BaseModelLoader, get_loader, get_model_config, get_model_processor
 
 
 if TYPE_CHECKING:
@@ -43,11 +43,18 @@ def build_tokenizer(tokenizer_path: str) -> "PreTrainedTokenizer":
     return AutoTokenizer.from_pretrained(tokenizer_path, padding_side="right", trust_remote_code=True)
 
 
-def build_processor(processor_path: str) -> "ProcessorMixin":
+def build_processor(processor_path: str, force_use_huggingface: bool = False) -> "ProcessorMixin":
     """
     Builds the processor.
     """
-    return AutoProcessor.from_pretrained(processor_path, padding_side="right", trust_remote_code=True)
+    return get_model_processor(processor_path, force_use_huggingface, padding_side="right", trust_remote_code=True)
+
+
+def build_config(config_path: str, force_use_huggingface: bool = False, **config_kwargs) -> "PretrainedConfig":
+    """
+    Builds the model config.
+    """
+    return get_model_config(config_path, force_use_huggingface, trust_remote_code=True, **config_kwargs)
 
 
 def build_foundation_model(
@@ -73,7 +80,7 @@ def build_foundation_model(
     if isinstance(config_path, PretrainedConfig):
         config = config_path
     else:
-        config = AutoConfig.from_pretrained(config_path, trust_remote_code=True, **config_kwargs)
+        config = build_config(config_path, force_use_huggingface, **config_kwargs)
 
     if moe_implementation is not None:
         if moe_implementation not in ["eager", "fused"]:
@@ -123,5 +130,23 @@ def build_foundation_model(
         empty_init=empty_init,
         init_device=init_device,
     )
+
+    if is_torch_npu_available():
+        # We override the forward method (on NPU devices) instead of passing CPU FA kwargs directly to the model in the trainer,
+        # due to the behavior in https://github.com/pytorch/pytorch/blob/134179474539648ba7dee1317959529fbd0e7f89/torch/distributed/fsdp/_fully_shard/_fsdp_state.py#L130
+        logger.info_rank0(
+            "We override the model’s forward method on NPU devices to ensure that the FA kwargs are on CPU, since the npu_fused_attention requires cpu FA kwargs"
+        )
+        original_forward = model.forward
+
+        @functools.wraps(original_forward)
+        def wrapped_forward(*args, **kwargs):
+            if "cu_seq_lens_q" in kwargs and kwargs["cu_seq_lens_q"] is not None:
+                kwargs["cu_seq_lens_q"] = kwargs["cu_seq_lens_q"].cpu()
+            if "cu_seq_lens_k" in kwargs and kwargs["cu_seq_lens_k"] is not None:
+                kwargs["cu_seq_lens_k"] = kwargs["cu_seq_lens_k"].cpu()
+            return original_forward(*args, **kwargs)
+
+        model.forward = wrapped_forward
 
     return model

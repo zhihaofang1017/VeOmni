@@ -38,6 +38,7 @@ Our guiding principles when building VeOmni are:
 </div>
 
 ### 🔥 Latest News
+- [2025/1/11] Our Paper [OmniScale: Scaling Any Modality Model Training with Model-Centric Distributed Recipe Zoo]() was accepted by AAAI 2026
 - [2025/09/19] We release first offical release [v0.1.0](https://github.com/ByteDance-Seed/VeOmni/pull/75) of VeOmni.
 - [2025/08/01] We release [VeOmni Tech report](https://arxiv.org/abs/2508.02317) and open the [WeChat group](./assets/wechat.png). Feel free to join us!
 - [2025/04/03] We release VeOmni!
@@ -53,6 +54,8 @@ Our guiding principles when building VeOmni are:
   - [🧪 Upcoming Features](#-upcoming-features)
 - [🎈 Getting Started](#-getting-started)
   - [🔧 Installation](#-installation)
+    - [(Recommended) Use `uv` Managed Virtual Environment](#recommended-use-uv-managed-virtual-environment)
+    - [`pip` Based Install](#pip-based-install)
   - [🚀 Quick Start](#-quick-start)
   - [🔒 Merge checkpoints](#-merge-checkpoints)
   - [📦 Build Docker](#-build-docker)
@@ -116,33 +119,63 @@ Read the [VeOmni Best Practice](docs/start/best_practice.md) for more details.
 
 #### (Recommended) Use `uv` Managed Virtual Environment
 
-We recommend to use [`uv`](https://docs.astral.sh/uv/) managed virtual environment
-to run VeOmni.
+We recommend using [`uv`](https://docs.astral.sh/uv/) managed virtual environment to run VeOmni.
+
+**Install uv** (if not already installed):
+```shell
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Install VeOmni with uv**:
 
 ```shell
-# For GPU
+# For GPU (CUDA 12.8)
 uv sync --extra gpu
+
 # For Ascend NPU
 uv sync --extra npu
-# You can install other optional deps by adding --extra like --extra dit
+
+# Install multiple extras (e.g., GPU + audio + DiT support)
+uv sync --extra gpu --extra audio --extra dit
 
 # Activate the uv managed virtual environment
 source .venv/bin/activate
 ```
 
+**Available extras**:
+- `gpu`: CUDA 12.8 support with torch 2.8.0, flash-attention, liger-kernel
+- `npu`: Ascend NPU support with torch-npu
+- `audio`: Audio processing libraries (av, librosa, soundfile)
+- `dit`: Diffusion model support (diffusers, bitsandbytes)
+- `megatron`: Megatron-Energon support
+- `trl`: Transformer Reinforcement Learning support
+
 #### `pip` Based Install
 
-Install using PyPI:
+Install from PyPI (requires manually installing PyTorch first):
 
 ```shell
+# Install PyTorch first (choose based on your hardware)
+# For GPU with CUDA 12.8:
+pip3 install torch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 \
+  --index-url https://download.pytorch.org/whl/cu128
+
+# For CPU:
+pip3 install torch==2.8.0+cpu torchvision==0.23.0+cpu torchaudio==2.8.0+cpu \
+  --index-url https://download.pytorch.org/whl/cpu
+
+# Then install VeOmni
 pip3 install veomni
 ```
 
 Install from source code:
 
 ```shell
+# Install PyTorch first (see above), then:
 pip3 install -e .
 ```
+
+**Note**: Using `uv` is recommended as it handles PyTorch version management and CUDA compatibility automatically. With `pip`, you need to manually ensure PyTorch versions match your CUDA installation.
 
 ### 🚀 Quick Start
 
@@ -261,15 +294,16 @@ bash train.sh  tasks/train_torch.py configs/pretrain/llama3.yaml
 
 ## ✏️ Supported Models
 
-| Model                                                    | Model size                    | Example config File                                       |
-| -------------------------------------------------------- | ----------------------------- | --------------------------------------------------------- |
-| [DeepSeek 2.5/3/R1](https://huggingface.co/deepseek-ai)  | 236B/671B                     | [deepseek.yaml](configs/pretrain/deepseek.yaml)           |
-| [Llama 3-3.3](https://huggingface.co/meta-llama)         | 1B/3B/8B/70B                  | [llama3.yaml](configs/pretrain/llama3.yaml)               |
-| [Qwen 2-3](https://huggingface.co/Qwen)                  | 0.5B/1.5B/3B/7B/14B/32B/72B/  | [qwen2_5.yaml](configs/pretrain/qwen2_5.yaml)             |
-| [Qwen2-VL/Qwen2.5-VL/QVQ](https://huggingface.co/Qwen)   | 2B/3B/7B/32B/72B              | [qwen2_vl.yaml](configs/multimodal/qwen2_vl/qwen2_vl.yaml)|
-| [Qwen3-MoE](https://huggingface.co/Qwen)                 | A330B/A22B235B                | [qwen3-moe.yaml](configs/pretrain/qwen3-moe.yaml)         |
-| [Wan](https://huggingface.co/Wan-AI)                     | Wan2.1-I2V-14B-480P           | [wan_sft.yaml](configs/dit/wan_sft.yaml)                  |
-| Omni Model                                               | Any Modality Training         | [seed_omni.yaml](configs/multimodal/omni/seed_omni.yaml)  |
+| Model                                                    | Model size                    | Example config File                                                   |
+| -------------------------------------------------------- | ----------------------------- | ----------------------------------------------------------------------|
+| [DeepSeek 2.5/3/R1](https://huggingface.co/deepseek-ai)  | 236B/671B                     | [deepseek.yaml](configs/pretrain/deepseek.yaml)                       |
+| [Llama 3-3.3](https://huggingface.co/meta-llama)         | 1B/3B/8B/70B                  | [llama3.yaml](configs/pretrain/llama3.yaml)                           |
+| [Qwen 2-3](https://huggingface.co/Qwen)                  | 0.5B/1.5B/3B/7B/14B/32B/72B/  | [qwen2_5.yaml](configs/pretrain/qwen2_5.yaml)                         |
+| [Qwen2-3 VL/QVQ](https://huggingface.co/Qwen)            | 2B/3B/7B/32B/72B              | [qwen3_vl_dense.yaml](configs/multimodal/qwen3_vl/qwen3_vl_dense.yaml)|
+| [Qwen3-VL MoE](https://huggingface.co/Qwen)              | 30BA3B/235BA22B               | [qwen3_vl_moe.yaml](configs/multimodal/qwen3_vl/qwen3_vl_moe.yaml)    |
+| [Qwen3-MoE](https://huggingface.co/Qwen)                 | 30BA3B/235BA22B               | [qwen3-moe.yaml](configs/pretrain/qwen3-moe.yaml)                     |
+| [Wan](https://huggingface.co/Wan-AI)                     | Wan2.1-I2V-14B-480P           | [wan_sft.yaml](configs/dit/wan_sft.yaml)                              |
+| Omni Model                                               | Any Modality Training         | [seed_omni.yaml](configs/multimodal/omni/seed_omni.yaml)              |
 
 
 > VeOmni Support all [transformers](https://github.com/huggingface/transformers) models if you don't need sequence parallelism or experts parallelism or other parallelism and cuda kernal optimize in VeOmni. We design a [model registry mechanism](veomni/models/registry.py). When the model is registered in veomni, we will automatically load the model and optimizer in VeOmni. Otherwise, it will default to load the modeling file in transformers.
@@ -292,10 +326,13 @@ Thanks to the following projects for their excellent work:
 - [torchtune](https://github.com/pytorch/torchtune)
 
 ## 💡 Awesome work using VeOmni
+- [dFactory: Easy and Efficient dLLM Fine-Tuning](https://github.com/inclusionAI/dFactory)
+- [LMMs-Engine](https://github.com/EvolvingLMMs-Lab/lmms-engine)
 - [UI-TARS: Pioneering Automated GUI Interaction with Native Agents](https://github.com/bytedance/UI-TARS)
 - [OpenHA: A Series of Open-Source Hierarchical
 Agentic Models in Minecraft](https://arxiv.org/pdf/2509.13347)
 - [UI-TARS-2 Technical Report: Advancing GUI Agent with Multi-Turn Reinforcement Learning](https://arxiv.org/abs/2509.02544)
+- [Open-dLLM: Open Diffusion Large Language Models](https://github.com/pengzhangzhi/Open-dLLM)
 
 ## 🎨 Contributing
 

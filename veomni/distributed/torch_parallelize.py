@@ -27,9 +27,9 @@ from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.checkpoint import noop_context_fn
 
-from ..models import load_model_weights
+from ..models import load_model_weights, rank0_load_and_broadcast_weights
 from ..utils import logging
-from ..utils.device import get_device_id, get_device_type
+from ..utils.device import IS_NPU_AVAILABLE, get_device_id, get_device_type
 from ..utils.import_utils import is_torch_version_greater_than
 from .checkpoint import CheckpointFunction
 from .fsdp import (
@@ -49,6 +49,13 @@ if is_torch_version_greater_than("2.4"):
 
 
 logger = logging.get_logger(__name__)
+
+
+def _reset_hf_initialized_flag(module: nn.Module) -> None:
+    if hasattr(module, "_is_hf_initialized"):
+        module._is_hf_initialized = False
+    for child in module.children():
+        _reset_hf_initialized_flag(child)
 
 
 def verbose_fsdp_grouping(model, prefix="", depth=0):
@@ -306,6 +313,9 @@ def parallelize_model_fsdp2(
         mp_ignored_classes = modules_to_ignore_in_mixed_precision
         fsdp_kwargs_without_mp = dict(fsdp_kwargs)
         fsdp_kwargs_without_mp.pop("mp_policy", None)
+        # for high-precision modules, we do not reshard them after forward to avoid all-gather them in backward
+        # these modules will stay in GPU memory so please ensure high-precision modules do not contain too many parameters
+        fsdp_kwargs_without_mp["reshard_after_forward"] = False
     else:
         mp_ignored_classes = None
         fsdp_kwargs_without_mp = fsdp_kwargs
@@ -329,6 +339,13 @@ def parallelize_model_fsdp2(
     # | -- experts layer (apply fully_shard separately in order to shard across EP groups on the same EP rank instead of sharding globally)
     # | -- layers (declared in model.modules_to_ignore_in_mixed_precision) that need to apply fully_shard separately due to different mp policy as the decoder layer
     #      (e.g., some models requires MoE TopK gate layer to have parameters in higher FP32 precision in forward).
+    # NPU currently does not support the PreSumMul operation, so this operation is supported through the apply_hccl_premul_sum_patch.
+    # TODO(https://github.com/ByteDance-Seed/VeOmni/issues/241):
+    # NPU is missing PreSumMul ReduceOp. Need to remove this condition after the issue is resolved.
+    if IS_NPU_AVAILABLE and parallel_state.ep_enabled:
+        from veomni.ops.patch.hccl_premul_sum import apply_hccl_premul_sum_patch
+
+        apply_hccl_premul_sum_patch()
     for layer_fqn, layer_mod, experts_mod in layer_pairs:
         # register all the FSDPModule inside this decoder layer for the convenience of manual prefetching configuration
         layer_mod._fsdp_modules = []
@@ -336,18 +353,23 @@ def parallelize_model_fsdp2(
         if parallel_state.ep_enabled and experts_mod is not None:
             # shard expert
             fully_shard(experts_mod, **expert_fsdp_kwargs)
-            if hasattr(experts_mod, "set_gradient_divide_factor"):
-                # average EP grads across EP ranks
-                experts_mod.set_gradient_divide_factor(parallel_state.ep_size)
+            # average EP grads across EP ranks
+            # NOTE: in torch 2.8 and later we should use
+            # experts_mod.set_gradient_divide_factor(parallel_state.ep_size)
+            # but for torch 2.7 we still use set_reduce_scatter_divide_factor(parallel_state.ep_size)
+            gradient_divide_factor = parallel_state.ep_gradient_divide_factor
+            logger.info(f"setting grad divide factor for ep module to {gradient_divide_factor}")
+            if IS_NPU_AVAILABLE:
+                # NPU is using torch 2.7
+                experts_mod.set_reduce_scatter_divide_factor(gradient_divide_factor)
+            else:
+                # from torch 2.8
+                experts_mod.set_gradient_divide_factor(gradient_divide_factor)
             layer_mod._fsdp_modules.append(experts_mod)
         # shard module that needs to ignore mixed precision control
         if mp_ignored_classes:
             for sub_mod in layer_mod.modules():
                 if isinstance(sub_mod, mp_ignored_classes) and sub_mod is not layer_mod:
-                    # this will also create a AllGather communication group
-                    # when modules here are small (like gating), this would slightly impacts the peformance
-                    # a better method might be adding them to ignored_params of fully_shard
-                    # but then they will need to be initialized separately
                     fully_shard(sub_mod, **fsdp_kwargs_without_mp)
                     layer_mod._fsdp_modules.append(sub_mod)
 
@@ -381,13 +403,19 @@ def parallelize_model_fsdp2(
     assert kwargs.get("init_device") == "meta", "Please use init_device: meta for FSDP2"
 
     if weights_path is None:
-        model.to_empty(device="cuda")
+        model.to_empty(device=get_device_type())
+        _reset_hf_initialized_flag(model)
         model.init_weights()
     else:
         from torch.distributed.tensor import distribute_tensor
 
         logger.info_rank0("starting to load model weights...")
-        load_model_weights(model, weights_path, get_device_type(), dtensor_factory=distribute_tensor)
+        if kwargs.get("broadcast_model_weights_from_rank0"):
+            logger.info_rank0("Loading model weights from disk on rank0 then broadcasting to other ranks...")
+            rank0_load_and_broadcast_weights(model, weights_path, get_device_type(), dtensor_factory=distribute_tensor)
+        else:
+            logger.info_rank0("Every rank would read weights from disk and expect this to be slow!")
+            load_model_weights(model, weights_path, get_device_type(), dtensor_factory=distribute_tensor)
 
     # Register grad norm clipping method for FSDP2
     from .fsdp2 import clip_grad_norm as clip_grad_norm_fn

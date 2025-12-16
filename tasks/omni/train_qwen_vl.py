@@ -3,28 +3,28 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from functools import partial
-from io import BytesIO
-from typing import TYPE_CHECKING, Any, Callable, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
 import wandb
-from PIL import Image
 from tqdm import trange
 
+from tasks.data.vlm_data_process import (
+    prepare_fa_kwargs_from_position_ids,
+    process_sample_qwen2_5_vl,
+    process_sample_qwen3_vl,
+)
 from veomni.checkpoint import build_checkpointer, ckpt_to_state_dict
 from veomni.data import (
     OmniDataCollatorWithPacking,
     OmniDataCollatorWithPadding,
     OmniSequenceShardCollator,
     build_dataloader,
-    build_interleave_dataset,
-    build_iterative_dataset,
-    build_mapping_dataset,
+    build_dataset,
     build_multimodal_chat_template,
 )
-from veomni.data.constants import IMAGE_INPUT_INDEX
-from veomni.data.multimodal.preprocess import conv_preprocess
+from veomni.distributed.clip_grad_norm import veomni_clip_grad_norm
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -34,7 +34,7 @@ from veomni.utils import helper
 from veomni.utils.arguments import DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from veomni.utils.device import (
     get_device_type,
-    get_nccl_backend,
+    get_dist_comm_backend,
     get_torch_device,
     synchronize,
 )
@@ -42,64 +42,15 @@ from veomni.utils.dist_utils import all_reduce
 
 
 if TYPE_CHECKING:
-    from transformers import ProcessorMixin
-
-    from veomni.data.chat_template import ChatTemplate
-
+    pass
 
 logger = helper.create_logger(__name__)
-
 
 MAX_PIXELS = 768 * 28 * 28
 ROLE_MAPPING = {
     "human": "user",
     "gpt": "assistant",
 }
-
-
-def process_sample(
-    sample: Dict[str, Any],
-    processor: "ProcessorMixin",
-    chat_template: "ChatTemplate",
-    position_id_func: "Callable",
-    **kwargs,
-):
-    """
-    Processes multimodal example with qwen2_5_vl's pre-processor.
-    """
-    source_name = sample["source_name"] if "source_name" in sample else kwargs["source_name"]
-    conversations = sample["text"] if source_name == "fineweb_100BT" else sample["conversations"]  # text-only data
-    conversations = conv_preprocess(source_name, conversations, **kwargs)
-
-    token_num_inputs, image_inputs = {}, {}
-    image_grid_thw = None
-
-    if "images" in sample and sample["images"]:
-        images = []
-        for image in sample["images"]:
-            images.append(Image.open(BytesIO(image)).convert("RGB"))
-
-        image_inputs = processor.image_processor(images=images, return_tensors="pt")
-        image_grid_thw = image_inputs["image_grid_thw"]
-        merge_length = processor.image_processor.merge_size**2
-        image_token_num = image_grid_thw.prod(dim=-1) // merge_length
-        token_num_inputs["image"] = image_token_num
-
-    tokenized_example = chat_template.encode_messages(conversations, token_num_inputs)
-    tokenized_example = {k: torch.tensor(v) for k, v in tokenized_example.items()}
-    input_ids = tokenized_example["input_ids"]
-
-    position_ids = position_id_func(
-        input_ids=input_ids.unsqueeze(0),
-        image_grid_thw=image_grid_thw,
-        attention_mask=tokenized_example["attention_mask"].unsqueeze(0),
-    )["position_ids"]
-    tokenized_example["position_ids"] = position_ids.squeeze().clone()  # (dim, l)
-
-    tokenized_example["image_mask"] = tokenized_example["input_ids"] == IMAGE_INPUT_INDEX
-    tokenized_example["input_ids"][tokenized_example["image_mask"]] = 0
-    tokenized_example.update(image_inputs)
-    return [tokenized_example]
 
 
 def get_param_groups(model: "torch.nn.Module", default_lr: float, vit_lr: float):
@@ -127,9 +78,17 @@ class MyTrainingArguments(TrainingArguments):
 
 
 @dataclass
+class MyDataArguments(DataArguments):
+    mm_configs: Optional[Dict] = field(
+        default_factory=dict,
+        metadata={"help": "Config for multimodal input."},
+    )
+
+
+@dataclass
 class Arguments:
     model: "ModelArguments" = field(default_factory=ModelArguments)
-    data: "DataArguments" = field(default_factory=DataArguments)
+    data: "MyDataArguments" = field(default_factory=MyDataArguments)
     train: "MyTrainingArguments" = field(default_factory=MyTrainingArguments)
 
 
@@ -138,7 +97,7 @@ def main():
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
     get_torch_device().set_device(f"{get_device_type()}:{args.train.local_rank}")
-    dist.init_process_group(backend=get_nccl_backend())
+    dist.init_process_group(backend=get_dist_comm_backend())
     helper.set_seed(args.train.seed, args.train.enable_full_determinism)
     if args.train.local_rank == 0:
         helper.enable_third_party_logging()
@@ -166,6 +125,7 @@ def main():
         weights_path=args.model.model_path,
         init_device=args.train.init_device,
         force_use_huggingface=args.model.force_use_huggingface,
+        moe_implementation=args.model.moe_implementation,
         attn_implementation=args.model.attn_implementation,
     )
     model_config = model.config
@@ -176,15 +136,28 @@ def main():
     processor.image_processor.max_pixels = MAX_PIXELS
     position_id_func = model.get_position_id_func()
     chat_template = build_multimodal_chat_template(args.data.chat_template, processor.tokenizer)
-    transform = partial(
-        process_sample,
-        processor=processor,
-        chat_template=chat_template,
-        position_id_func=position_id_func,
-    )
+
+    if model_config.model_type == "qwen2_5_vl":
+        transform = partial(
+            process_sample_qwen2_5_vl,
+            processor=processor,
+            chat_template=chat_template,
+            position_id_func=position_id_func,
+            **args.data.mm_configs,
+        )
+    elif model_config.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+        transform = partial(
+            process_sample_qwen3_vl,
+            processor=processor,
+            chat_template=chat_template,
+            position_id_func=position_id_func,
+            **args.data.mm_configs,
+        )
+    else:
+        raise ValueError(f"Unsupported model type: {model_config.model_type}")
 
     if args.train.rmpad:
-        raise ValueError("Qwen2-VL does not support rmpad. Use `rmpad_with_pos_ids` instead.")
+        raise ValueError("QwenVL does not support rmpad. Use `rmpad_with_pos_ids` instead.")
 
     data_collate_fn = []
     if args.train.rmpad_with_pos_ids:
@@ -196,54 +169,49 @@ def main():
             OmniSequenceShardCollator(
                 padding_scale={
                     "pixel_values": processor.image_processor.merge_size**2,
+                    "pixel_values_videos": (
+                        processor.video_processor
+                        if hasattr(processor, "video_processor")
+                        else processor.image_processor
+                    ).merge_size
+                    ** 2,
                 },
                 rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
             )
         )
 
-    if args.data.dataloader_type == "native":
-        if args.data.enable_multisource:
-            logger.info_rank0("Start building interleave dataset")
-            train_dataset = build_interleave_dataset(
-                args.data.train_path, args.data.datasets_type, transform=transform, seed=args.train.seed
-            )
-        elif args.data.datasets_type == "iterable":
-            logger.info_rank0("Start building iterative dataset")
-            train_dataset = build_iterative_dataset(
-                args.data.train_path, transform=transform, seed=args.train.seed, source_name=args.data.source_name
-            )
-        elif args.data.datasets_type == "mapping":
-            logger.info_rank0("Start building mapping dataset")
-            train_dataset = build_mapping_dataset(
-                args.data.train_path, transform=transform, source_name=args.data.source_name
-            )
+    train_dataset = build_dataset(
+        dataset_name=args.data.dataset_name,
+        transform=transform,
+        dataloader_batch_size=args.train.dataloader_batch_size,
+        seed=args.train.seed,
+        **asdict(args.data),
+    )
+    dataset_length = None if not hasattr(train_dataset, "__len__") else len(train_dataset)
+    if args.data.datasets_type == "mapping":
+        dataset_length = dataset_length / args.train.data_parallel_size
+    args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, dataset_length)
 
-        dataset_length = None if not hasattr(train_dataset, "__len__") else len(train_dataset)
-        if args.data.datasets_type == "mapping":
-            dataset_length = dataset_length / args.train.data_parallel_size
-        args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, dataset_length)
-
-        train_dataloader = build_dataloader(
-            dataset=train_dataset,
-            micro_batch_size=args.train.micro_batch_size,
-            global_batch_size=args.train.global_batch_size,
-            dataloader_batch_size=args.train.dataloader_batch_size,
-            seed=args.train.seed,
-            collate_fn=data_collate_fn,
-            max_seq_len=args.data.max_seq_len,
-            train_steps=args.train.train_steps,
-            rmpad=args.train.rmpad,
-            rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
-            bsz_warmup_ratio=args.train.bsz_warmup_ratio,
-            dyn_bsz_margin=args.train.dyn_bsz_margin,
-            dyn_bsz_buffer_size=args.train.dyn_bsz_buffer_size,
-            num_workers=args.data.num_workers,
-            drop_last=args.data.drop_last,
-            pin_memory=args.data.pin_memory,
-            prefetch_factor=args.data.prefetch_factor,
-        )
-    else:
-        raise NotImplementedError(f"Unsupported dataloader type: {args.data.dataloader_type}.")
+    train_dataloader = build_dataloader(
+        dataloader_type=args.data.dataloader_type,
+        dataset=train_dataset,
+        micro_batch_size=args.train.micro_batch_size,
+        global_batch_size=args.train.global_batch_size,
+        dataloader_batch_size=args.train.dataloader_batch_size,
+        seed=args.train.seed,
+        collate_fn=data_collate_fn,
+        max_seq_len=args.data.max_seq_len,
+        train_steps=args.train.train_steps,
+        rmpad=args.train.rmpad,
+        rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
+        bsz_warmup_ratio=args.train.bsz_warmup_ratio,
+        dyn_bsz_margin=args.train.dyn_bsz_margin,
+        dyn_bsz_buffer_size=args.train.dyn_bsz_buffer_size,
+        num_workers=args.data.num_workers,
+        drop_last=args.data.drop_last,
+        pin_memory=args.data.pin_memory,
+        prefetch_factor=args.data.prefetch_factor,
+    )
 
     fsdp_kwargs = {}
     if args.train.freeze_vit:
@@ -253,6 +221,7 @@ def main():
 
     model = build_parallelize_model(
         model,
+        weights_path=args.model.model_path,
         enable_full_shard=args.train.enable_full_shard,
         enable_mixed_precision=args.train.enable_mixed_precision,
         enable_gradient_checkpointing=args.train.enable_gradient_checkpointing,
@@ -371,12 +340,31 @@ def main():
                 environ_meter.add(micro_batch)
                 if args.data.enable_multisource:
                     micro_batch.pop("ds_idx", None)
+                    micro_batch.pop("cur_token_num", None)
                     micro_batch.pop("source_name", None)
+
+                # For QwenVL: get_position_id -> (dim, 1, seq_len), then squeezed to (dim, seq_len)
+                # data collator adds batch dim -> (1, dim, seq_len) for unified SP slicing
+                # transpose back to (dim, 1, seq_len) for QwenVL compatibility
+                if micro_batch["position_ids"].shape[1] == 3:
+                    micro_batch["position_ids"] = micro_batch["position_ids"].transpose(0, 1).contiguous()
+
+                # Prepare flash attention kwargs from position_ids for both Qwen2.5-VL and Qwen3-VL
+                fa_kwargs = prepare_fa_kwargs_from_position_ids(micro_batch["position_ids"][0])
+                micro_batch.update(
+                    dict(
+                        cu_seq_lens_q=fa_kwargs["cu_seq_lens_q"],
+                        cu_seq_lens_k=fa_kwargs["cu_seq_lens_k"],
+                        max_length_q=fa_kwargs["max_length_q"],
+                        max_length_k=fa_kwargs["max_length_k"],
+                    )
+                )
 
                 micro_batch = {
                     k: v.to(get_device_type(), non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in micro_batch.items()
                 }
+
                 with model_fwd_context:
                     loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss / len(micro_batches)
 
@@ -386,16 +374,11 @@ def main():
                 total_loss += loss.item()
                 del micro_batch
 
-            if args.train.data_parallel_mode == "fsdp1":
-                grad_norm = model.clip_grad_norm_(args.train.max_grad_norm).item()
-            else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.train.max_grad_norm, foreach=True)
+            grad_norm = veomni_clip_grad_norm(model, args.train.max_grad_norm)
 
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-            if hasattr(grad_norm, "full_tensor"):
-                grad_norm = grad_norm.full_tensor().item()
 
             # collect mean loss across data parallel group
             total_loss, grad_norm = all_reduce((total_loss, grad_norm), group=get_parallel_state().fsdp_group)
@@ -404,7 +387,9 @@ def main():
             lr = max(lr_scheduler.get_last_lr())
             train_metrics = environ_meter.step(delta_time, global_step=global_step)
 
-            data_loader_tqdm.set_postfix_str(f"loss: {total_loss:.2f}, grad_norm: {grad_norm:.2f}, lr: {lr:.2e}")
+            data_loader_tqdm.set_postfix_str(
+                f"loss: {total_loss:.2f}, grad_norm: {grad_norm:.2f}, lr: {lr:.2e}", refresh=False
+            )
             data_loader_tqdm.update()
 
             if args.train.global_rank == 0:
@@ -433,13 +418,6 @@ def main():
                     },
                 }
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
-                if args.train.global_rank == 0:
-                    helper.save_step2token(
-                        args.train.step2token_path,
-                        consumed_tokens=train_metrics["consume_tokens(B)"],
-                        global_step=global_step,
-                        save_checkpoint_path=save_checkpoint_path,
-                    )
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
 
@@ -460,13 +438,6 @@ def main():
                 },
             }
             Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
-            if args.train.global_rank == 0:
-                helper.save_step2token(
-                    args.train.step2token_path,
-                    consumed_tokens=train_metrics["consume_tokens(B)"],
-                    global_step=global_step,
-                    save_checkpoint_path=save_checkpoint_path,
-                )
             dist.barrier()
             logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
 
