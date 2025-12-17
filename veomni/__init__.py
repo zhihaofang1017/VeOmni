@@ -11,15 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as get_version
+
+from packaging.version import parse as parse_version
+
 from .utils.import_utils import (
+    is_torch_npu_available,
     is_veomni_patch_available,
 )
 from .utils.logging import get_logger
 
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as get_version
-from packaging.version import parse as parse_version
-from .utils.import_utils import is_torch_npu_available, is_veomni_patch_available
 
 logger = get_logger(__name__)
 

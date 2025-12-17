@@ -17,10 +17,11 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
-from torch_npu import npu_rotary_mul as apply_rotary_emb
+
 from veomni.models.transformers.qwen3_moe import modeling_qwen3_moe
 
 from .group_gemm.kernel.npu_group_gemm import GmmFunction
+
 
 # This api can improve performance on ASCEND NPU
 def rms_norm_forward_npu(self, x):
@@ -61,7 +62,7 @@ def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) ->
     w1 = self.experts.up_proj.transpose(1, 2).to(input_dtype)
     w2 = self.experts.gate_proj.transpose(1, 2).to(input_dtype)
     w3 = self.experts.down_proj.transpose(1, 2).to(input_dtype)
-    
+
 
     permuted_tokens, row_ids_map = torch_npu.npu_moe_token_permute(hidden_states, selected_experts.to(torch.int32))
     tokens_per_expert = torch.histc(selected_experts, bins=self.num_experts, min=0, max=self.num_experts)
