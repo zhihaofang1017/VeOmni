@@ -63,7 +63,6 @@ def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) ->
     w2 = self.experts.gate_proj.transpose(1, 2).to(input_dtype)
     w3 = self.experts.down_proj.transpose(1, 2).to(input_dtype)
 
-
     permuted_tokens, row_ids_map = torch_npu.npu_moe_token_permute(hidden_states, selected_experts.to(torch.int32))
     tokens_per_expert = torch.histc(selected_experts, bins=self.num_experts, min=0, max=self.num_experts)
 
@@ -75,7 +74,6 @@ def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) ->
     final_hidden_states = torch_npu.npu_moe_token_unpermute(down_res, row_ids_map, probs=routing_weights)
 
     return final_hidden_states, router_logits
-
 
 
 # Patches for Qwen3 MoE Model
