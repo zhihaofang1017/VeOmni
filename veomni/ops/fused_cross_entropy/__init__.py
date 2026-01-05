@@ -197,6 +197,7 @@ def chunk_loss_function(
 
 def apply_veomni_loss_patch():
     LOSS_MAPPING["ForCausalLM"] = ForCausalLMLoss
+    LOSS_MAPPING["ForConditionalGeneration"] = ForCausalLMLoss
     global _cross_entropy
     if is_torch_npu_available():
         if os.environ.get("VEOMNI_ENABLE_CHUNK_LOSS", "0") == "1":
