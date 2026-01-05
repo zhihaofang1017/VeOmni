@@ -197,9 +197,10 @@ def chunk_loss_function(
 
 def apply_veomni_loss_patch():
     LOSS_MAPPING["ForCausalLM"] = ForCausalLMLoss
-    LOSS_MAPPING["ChunkLoss"] = chunk_loss_function
     global _cross_entropy
     if is_torch_npu_available():
+        if os.environ.get("VEOMNI_ENABLE_CHUNK_LOSS", "0") == "1":
+            LOSS_MAPPING["ForCausalLM"] = chunk_loss_function
         _cross_entropy = eager_cross_entropy
     elif is_liger_kernel_available() and get_env("USE_LIGER_KERNEL") == "1":
         from .liger_kernel import fused_liger_kernel_cross_entropy
