@@ -154,6 +154,7 @@ def chunk_loss_function(
     hidden_states: torch.Tensor,
     weights: torch.Tensor,
     labels: torch.Tensor,
+    chunk_size: int = 1024,
     vocab_size: Optional[int] = None,
     num_items_in_batch: Optional[int] = None,
     ignore_index: int = -100,
@@ -183,11 +184,10 @@ def chunk_loss_function(
         )
         return loss, logits
 
-    chunk_size = 1024
     chunk_labels = torch.split(labels, chunk_size, dim=1)
 
     loss_kwargs_chunks = [
-        {"labels": chunk_labels[i], "ignore_index": -100, "num_items_in_batch": (labels != ignore_index).sum()}
+        {"labels": chunk_labels[i], "ignore_index": ignore_index, "num_items_in_batch": (labels != ignore_index).sum()}
         for i in range(len(chunk_labels))
     ]
 
