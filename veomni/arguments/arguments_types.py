@@ -380,12 +380,6 @@ class CheckpointConfig:
 class TrainingArguments:
     """train.* — Top-level training configuration."""
 
-    train_architecture: Literal["full", "lora"] = field(
-        default="full",
-        metadata={
-            "help": "Specifies the parameter update strategy for training the multi-modal model. 'full' for Standard SFT, lora for LoRA."
-        },
-    )
     dyn_bsz: bool = field(
         default=True,
         metadata={"help": "Enable dynamic batch size for padding-free training."},
@@ -856,6 +850,10 @@ class ModelArguments:
     model_path: Optional[str] = field(
         default=None,
         metadata={"help": "Local path/HDFS path to the pre-trained model. If unspecified, use random init."},
+    )
+    model_config: Optional[Dict] = field(
+        default_factory=dict,
+        metadata={"help": "Config to overwrite foundation model config."},
     )
     tokenizer_path: Optional[str] = field(
         default=None,
