@@ -103,9 +103,9 @@
 +
 +from veomni.distributed.parallel_state import get_parallel_state
 +from veomni.distributed.sequence_parallel import (
-+    gather_heads_scatter_seq,
-+    gather_seq_scatter_heads,
++    gather_outputs,
 +    pad_tensor,
++    slice_input_tensor,
 +    sp_pad_and_slice,
 +    unpad_tensor,
 +)
@@ -251,8 +251,8 @@
 
 +    # ================================================================
 +    # Patch: Qwen2_5_VisionTransformerPretrainedModel.forward
-+    # 1. SP all-to-all to get full-seq hidden_states for window attention
-+    #    (gather_seq_scatter_heads / gather_heads_scatter_seq around the
++    # 1. SP all_gather to get full-seq hidden_states for window attention
++    #    (gather_outputs / slice_input_tensor around the
 +    #    window-index permutation + merger fill-back)
 +    # 2. SP-pad cu_seqlens / cu_window_seqlens / position embeddings so the
 +    #    padded tokens participate in a valid attention window
@@ -284,7 +284,7 @@
          hidden_states = self.patch_embed(hidden_states)
          rotary_pos_emb = self.rot_pos_emb(grid_thw)
          window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-@@ -465,6 +550,24 @@
+@@ -465,6 +550,22 @@
              dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
          )
          cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
@@ -299,9 +299,7 @@
 +        unpadded_dim_size = cu_seqlens[-1]
 +        sp_padding_size = 0
 +        if get_parallel_state().sp_enabled:
-+            hidden_states = gather_seq_scatter_heads(
-+                hidden_states, seq_dim=0, head_dim=1, group=get_parallel_state().sp_group
-+            )
++            hidden_states = gather_outputs(hidden_states, gather_dim=0, group=get_parallel_state().sp_group)
 +            sp_padding_size = hidden_states.size(0) - unpadded_dim_size
 +            if sp_padding_size > 0:
 +                hidden_states = unpad_tensor(hidden_states, dim=0, padding_size=sp_padding_size)
@@ -309,7 +307,7 @@
 
          seq_len, _ = hidden_states.size()
          hidden_states = hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-@@ -474,39 +577,107 @@
+@@ -474,39 +575,103 @@
          rotary_pos_emb = rotary_pos_emb[window_index, :, :]
          rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
          emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
@@ -326,9 +324,7 @@
 +                cu_window_seqlens = torch.cat([cu_window_seqlens, new_cumsum.unsqueeze(0)], dim=0)
 +                # --- Patch.2 ---
 +            # --- Patch.1 ---
-+            hidden_states = gather_heads_scatter_seq(
-+                hidden_states, seq_dim=0, head_dim=1, group=get_parallel_state().sp_group
-+            )
++            hidden_states = slice_input_tensor(hidden_states, dim=0, group=get_parallel_state().sp_group)
 +            # --- Patch.1 ---
 +            # --- Patch.2 ---
 +            emb = sp_pad_and_slice(emb, dim=0)
@@ -376,17 +372,15 @@
 +        # --- Patch.1 ---
 +        if get_parallel_state().sp_enabled:
 +            merged_sp_padding = sp_padding_size // self.spatial_merge_unit
-+            merged_hidden_states = gather_seq_scatter_heads(
-+                merged_hidden_states, seq_dim=0, head_dim=1, group=get_parallel_state().sp_group
++            merged_hidden_states = gather_outputs(
++                merged_hidden_states, gather_dim=0, group=get_parallel_state().sp_group
 +            )
 +            if merged_sp_padding > 0:
 +                merged_hidden_states = unpad_tensor(merged_hidden_states, dim=0, padding_size=merged_sp_padding)
 +            merged_hidden_states = merged_hidden_states[reverse_indices, :]
 +            if merged_sp_padding > 0:
 +                merged_hidden_states = pad_tensor(merged_hidden_states, dim=0, padding_size=merged_sp_padding)
-+            merged_hidden_states = gather_heads_scatter_seq(
-+                merged_hidden_states, seq_dim=0, head_dim=1, group=get_parallel_state().sp_group
-+            )
++            merged_hidden_states = slice_input_tensor(merged_hidden_states, dim=0, group=get_parallel_state().sp_group)
 +        else:
 +            merged_hidden_states = merged_hidden_states[reverse_indices, :]
 +        # --- Patch.1 ---
@@ -428,7 +422,7 @@
 
 
  @dataclass
-@@ -990,6 +1161,12 @@
+@@ -990,6 +1155,12 @@
              hidden_states=all_hidden_states,
              attentions=all_self_attns,
          )
@@ -441,7 +435,7 @@
 
 
  @auto_docstring
-@@ -1211,45 +1388,25 @@
+@@ -1211,45 +1382,25 @@
 
          return vision_outputs
 
@@ -500,15 +494,15 @@
          return special_image_mask, special_video_mask
 
      def compute_3d_position_ids(
-@@ -1291,6 +1448,25 @@
+@@ -1291,6 +1442,25 @@
              position_ids = None
          return position_ids
 
 +    # ================================================================
 +    # Patch: Qwen2_5_VLModel.forward
-+    # 1. Ulysses SP scatter/gather around the visual-embed masked_scatter
-+    #    (gather_seq_scatter_heads on inputs_embeds + image/video embeds,
-+    #    gather_heads_scatter_seq after fill-back)
++    # 1. Ulysses SP gather/slice around the visual-embed masked_scatter
++    #    (gather_outputs on inputs_embeds + image/video embeds,
++    #    slice_input_tensor after fill-back)
 +    # 2. precomputed image/video masks: use kwargs["image_mask"/"video_mask"]
 +    #    when provided by the VeOmni data pipeline; otherwise all-gather
 +    #    input_ids across SP group and recompute masks on the full sequence
@@ -526,7 +520,7 @@
      @auto_docstring
      def forward(
          self,
-@@ -1312,17 +1488,6 @@
+@@ -1312,17 +1482,6 @@
          second_per_grid_ts: torch.Tensor | None = None,
          **kwargs: Unpack[TransformersKwargs],
      ) -> tuple | Qwen2_5_VLModelOutputWithPast:
@@ -544,7 +538,7 @@
          output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
          output_hidden_states = (
              output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-@@ -1332,21 +1497,86 @@
+@@ -1332,21 +1491,78 @@
          if inputs_embeds is None:
              inputs_embeds = self.get_input_embeddings()(input_ids)
 
@@ -569,9 +563,7 @@
 +
 +        # --- Patch.1 ---
 +        if get_parallel_state().sp_enabled:
-+            inputs_embeds = gather_seq_scatter_heads(
-+                inputs_embeds, seq_dim=1, head_dim=2, group=get_parallel_state().sp_group
-+            )
++            inputs_embeds = gather_outputs(inputs_embeds, gather_dim=1, group=get_parallel_state().sp_group)
 +        # --- Patch.1 ---
 +
          if pixel_values is not None:
@@ -587,9 +579,7 @@
 +            # --- Patch.6 ---
 +            # --- Patch.1 ---
 +            if get_parallel_state().sp_enabled:
-+                image_embeds = gather_seq_scatter_heads(
-+                    image_embeds, seq_dim=0, head_dim=-1, group=get_parallel_state().sp_group
-+                )
++                image_embeds = gather_outputs(image_embeds, gather_dim=0, group=get_parallel_state().sp_group)
 +            # --- Patch.1 ---
 +            n_image_tokens = image_mask.sum().long().item()
 +            image_embeds = image_embeds[:n_image_tokens]
@@ -614,9 +604,7 @@
 +            # --- Patch.6 ---
 +            # --- Patch.1 ---
 +            if get_parallel_state().sp_enabled:
-+                video_embeds = gather_seq_scatter_heads(
-+                    video_embeds, seq_dim=0, head_dim=-1, group=get_parallel_state().sp_group
-+                )
++                video_embeds = gather_outputs(video_embeds, gather_dim=0, group=get_parallel_state().sp_group)
 +            # --- Patch.1 ---
 +            n_video_tokens = video_mask.sum().long().item()
 +            video_embeds = video_embeds[:n_video_tokens]
@@ -632,14 +620,12 @@
 +
 +        # --- Patch.1 ---
 +        if get_parallel_state().sp_enabled:
-+            inputs_embeds = gather_heads_scatter_seq(
-+                inputs_embeds, head_dim=2, seq_dim=1, group=get_parallel_state().sp_group
-+            )
++            inputs_embeds = slice_input_tensor(inputs_embeds, dim=1, group=get_parallel_state().sp_group)
 +        # --- Patch.1 ---
 
          if position_ids is None:
              position_ids = self.compute_3d_position_ids(
-@@ -1358,6 +1588,15 @@
+@@ -1358,6 +1574,15 @@
                  attention_mask=attention_mask,
                  past_key_values=past_key_values,
              )
@@ -655,7 +641,7 @@
 
          outputs = self.language_model(
              input_ids=None,
-@@ -1410,6 +1649,12 @@
+@@ -1410,6 +1635,12 @@
      hidden_states: tuple[torch.FloatTensor] | None = None
      attentions: tuple[torch.FloatTensor] | None = None
      rope_deltas: torch.LongTensor | None = None
@@ -668,7 +654,7 @@
 
 
  class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMixin):
-@@ -1466,6 +1711,16 @@
+@@ -1466,6 +1697,16 @@
          """
          return self.model.get_image_features(pixel_values=pixel_values, image_grid_thw=image_grid_thw, **kwargs)
 
@@ -685,7 +671,7 @@
      @can_return_tuple
      @auto_docstring
      def forward(
-@@ -1488,64 +1743,13 @@
+@@ -1488,64 +1729,13 @@
          second_per_grid_ts: torch.Tensor | None = None,
          logits_to_keep: int | torch.Tensor = 0,
          **kwargs: Unpack[TransformersKwargs],
@@ -752,7 +738,7 @@
              input_ids=input_ids,
              pixel_values=pixel_values,
              pixel_values_videos=pixel_values_videos,
-@@ -1564,25 +1768,44 @@
+@@ -1564,25 +1754,44 @@
              **kwargs,
          )
 
@@ -807,7 +793,7 @@
          )
 
      def prepare_inputs_for_generation(
-@@ -1803,5 +2026,25 @@
+@@ -1803,5 +2012,25 @@
 
          return input_ids, model_kwargs
 
