@@ -279,6 +279,12 @@ def qwen3_vl_moe_model_forward_patched(
     cache_position: torch.LongTensor | None = None,
     **kwargs: Unpack[TransformersKwargs],
 ) -> tuple | Qwen3VLMoeModelOutputWithPast:
+    r"""
+    image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+        The temporal, height and width of feature shape of each image in LLM.
+    video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+        The temporal, height and width of feature shape of each video in LLM.
+    """
     if (input_ids is None) ^ (inputs_embeds is not None):
         raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -564,7 +570,12 @@ def qwen3_vl_moe_for_conditional_generation_forward_patched(
             # returns (loss, logits, log_probs, entropy); unpack to match the
             # OpSlot branch above.
             loss, logits, log_probs, entropy = self.loss_function(
-                logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size, **kwargs
+                logits=logits,
+                labels=labels,
+                vocab_size=self.config.text_config.vocab_size,
+                hidden_states=hidden_states,
+                weights=self.lm_head.weight,
+                **kwargs,
             )
     else:
         logits = self.lm_head(hidden_states)

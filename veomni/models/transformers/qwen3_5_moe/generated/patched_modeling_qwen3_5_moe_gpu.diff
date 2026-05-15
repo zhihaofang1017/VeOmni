@@ -1059,7 +1059,7 @@
          super().__init__(config)
          self.visual = Qwen3_5MoeVisionModel._from_config(config.vision_config)
          self.language_model = Qwen3_5MoeTextModel._from_config(config.text_config)
-@@ -1655,68 +2107,35 @@
+@@ -1655,68 +2107,38 @@
 
      @can_return_tuple
      @auto_docstring
@@ -1073,8 +1073,9 @@
          r"""
 -        pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
 -            The tensors corresponding to the input images.
--        image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
--            The temporal, height and width of feature shape of each image in LLM.
+         image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+             The temporal, height and width of feature shape of each image in LLM.
++
 +        Processes images through the vision tower and returns features as a single contiguous tensor.
 +
 +        Optimization Note:
@@ -1149,7 +1150,7 @@
          return special_image_mask, special_video_mask
 
      def compute_3d_position_ids(
-@@ -1769,6 +2188,7 @@
+@@ -1769,6 +2191,7 @@
          pixel_values_videos: torch.FloatTensor | None = None,
          image_grid_thw: torch.LongTensor | None = None,
          video_grid_thw: torch.LongTensor | None = None,
@@ -1157,7 +1158,7 @@
          cache_position: torch.LongTensor | None = None,
          **kwargs: Unpack[TransformersKwargs],
      ) -> tuple | Qwen3_5MoeModelOutputWithPast:
-@@ -1777,34 +2197,141 @@
+@@ -1777,34 +2200,141 @@
              The temporal, height and width of feature shape of each image in LLM.
          video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
              The temporal, height and width of feature shape of each video in LLM.
@@ -1307,7 +1308,7 @@
 
          if position_ids is None:
              position_ids = self.compute_3d_position_ids(
-@@ -1814,7 +2341,19 @@
+@@ -1814,7 +2344,19 @@
                  inputs_embeds=inputs_embeds,
                  attention_mask=attention_mask,
                  past_key_values=past_key_values,
@@ -1327,7 +1328,7 @@
 
          outputs = self.language_model(
              input_ids=None,
-@@ -1914,6 +2453,12 @@
+@@ -1914,6 +2456,12 @@
      return overall_loss * num_experts
 
 
@@ -1340,7 +1341,7 @@
  @auto_docstring
  class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
      _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
-@@ -1934,6 +2479,7 @@
+@@ -1934,6 +2482,7 @@
          # Initialize weights and apply final processing
          self.post_init()
 
@@ -1348,7 +1349,7 @@
      @can_return_tuple
      @auto_docstring
      def forward(
-@@ -1949,7 +2495,7 @@
+@@ -1949,7 +2498,7 @@
          cache_position: torch.LongTensor | None = None,
          logits_to_keep: int | torch.Tensor = 0,
          **kwargs: Unpack[TransformersKwargs],
@@ -1357,7 +1358,7 @@
          r"""
          labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
              Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-@@ -1993,24 +2539,55 @@
+@@ -1993,24 +2542,60 @@
          hidden_states = outputs.last_hidden_state
          # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
          slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -1386,7 +1387,12 @@
 +                # returns (loss, logits, log_probs, entropy); unpack to match the
 +                # OpSlot branch above.
 +                loss, logits, log_probs, entropy = self.loss_function(
-+                    logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs
++                    logits=logits,
++                    labels=labels,
++                    vocab_size=self.config.vocab_size,
++                    hidden_states=hidden_states,
++                    weights=self.lm_head.weight,
++                    **kwargs,
 +                )
 +        else:
 +            logits = self.lm_head(hidden_states)
@@ -1425,7 +1431,7 @@
              loss=loss,
              aux_loss=aux_loss,
              logits=logits,
-@@ -2018,7 +2595,15 @@
+@@ -2018,7 +2603,15 @@
              hidden_states=outputs.hidden_states,
              attentions=outputs.attentions,
              router_logits=outputs.router_logits,
@@ -1442,7 +1448,7 @@
 
 
  class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMixin):
-@@ -2073,6 +2658,7 @@
+@@ -2073,6 +2666,7 @@
          """
          return self.model.get_image_features(pixel_values=pixel_values, image_grid_thw=image_grid_thw, **kwargs)
 
@@ -1450,7 +1456,7 @@
      @can_return_tuple
      def forward(
          self,
-@@ -2089,58 +2675,7 @@
+@@ -2089,58 +2683,7 @@
          cache_position: torch.LongTensor | None = None,
          logits_to_keep: int | torch.Tensor = 0,
          **kwargs: Unpack[TransformersKwargs],
@@ -1510,7 +1516,7 @@
          outputs = self.model(
              input_ids=input_ids,
              pixel_values=pixel_values,
-@@ -2156,37 +2691,67 @@
+@@ -2156,37 +2699,72 @@
          )
 
          hidden_states = outputs[0]
@@ -1542,7 +1548,12 @@
 +                # returns (loss, logits, log_probs, entropy); unpack to match the
 +                # OpSlot branch above.
 +                loss, logits, log_probs, entropy = self.loss_function(
-+                    logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size, **kwargs
++                    logits=logits,
++                    labels=labels,
++                    vocab_size=self.config.text_config.vocab_size,
++                    hidden_states=hidden_states,
++                    weights=self.lm_head.weight,
++                    **kwargs,
 +                )
 +        else:
 +            logits = self.lm_head(hidden_states)
@@ -1593,7 +1604,7 @@
          )
 
      def prepare_inputs_for_generation(
-@@ -2413,6 +2978,19 @@
+@@ -2413,6 +2991,19 @@
 
          return input_ids, model_kwargs
 

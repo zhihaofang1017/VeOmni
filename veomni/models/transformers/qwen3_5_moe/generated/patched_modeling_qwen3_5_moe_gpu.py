@@ -2109,6 +2109,9 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
     @auto_docstring
     def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: torch.LongTensor | None = None):
         r"""
+        image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+            The temporal, height and width of feature shape of each image in LLM.
+
         Processes images through the vision tower and returns features as a single contiguous tensor.
 
         Optimization Note:
@@ -2562,7 +2565,12 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
                 # returns (loss, logits, log_probs, entropy); unpack to match the
                 # OpSlot branch above.
                 loss, logits, log_probs, entropy = self.loss_function(
-                    logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs
+                    logits=logits,
+                    labels=labels,
+                    vocab_size=self.config.vocab_size,
+                    hidden_states=hidden_states,
+                    weights=self.lm_head.weight,
+                    **kwargs,
                 )
         else:
             logits = self.lm_head(hidden_states)
@@ -2716,7 +2724,12 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMi
                 # returns (loss, logits, log_probs, entropy); unpack to match the
                 # OpSlot branch above.
                 loss, logits, log_probs, entropy = self.loss_function(
-                    logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size, **kwargs
+                    logits=logits,
+                    labels=labels,
+                    vocab_size=self.config.text_config.vocab_size,
+                    hidden_states=hidden_states,
+                    weights=self.lm_head.weight,
+                    **kwargs,
                 )
         else:
             logits = self.lm_head(hidden_states)

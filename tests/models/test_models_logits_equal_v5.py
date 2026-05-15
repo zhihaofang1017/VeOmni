@@ -1,23 +1,28 @@
 """Bitwise logits-equal tests for transformers v5 models.
 
-Sibling to ``test_models_logits_equal.py`` (v4 scope). v5 ships self-contained
-generated modeling under ``veomni/models/transformers/<model>/generated/``,
-so pristine ``transformers.*`` classes stay untouched and HF + VeOmni can be
-built side-by-side without an unpatch helper.
+v5 ships self-contained generated modeling under
+``veomni/models/transformers/<model>/generated/``, so pristine
+``transformers.*`` classes stay untouched and HF + VeOmni can be built
+side-by-side without an unpatch helper. The transformers v4 lane (and its
+sibling logits-equal file) was retired — v4-only models that have not yet
+been migrated to patchgen no longer have logits-equal coverage.
 
 Coverage
 --------
 Models under ``veomni/models/transformers/`` that register a patchgen-generated
 class via the ``transformers >= 5.2.0`` branch (the version pinned by the
-``transformers5-exp`` extra in ``pyproject.toml``):
+``transformers-stable`` default group in ``pyproject.toml``):
 
-- Causal-LM (text-only):           qwen2, qwen3, qwen3_moe
+- Causal-LM (text-only):           qwen2, qwen3, qwen3_moe, deepseek_v3
 - VLM via text-only sub-config
   (``*ForCausalLM`` registered):   qwen3_5, qwen3_5_moe
 - VLM full forward (image + text): qwen2_vl, qwen2_5_vl, qwen3_vl, qwen3_vl_moe
 - Omni thinker forward:            qwen3_omni_moe (forward on ``model.thinker``)
 - Causal-LM with MLA + DSA:        glm_moe_dsa (eager + sdpa only — the
   upstream class sets ``_supports_flash_attn = False``)
+- Causal-LM with MLA + MoE:        deepseek_v3 (eager + fp32 only — MLA SDPA
+  reshape doesn't reach bitwise parity with HF on the toy config; logit drift
+  dominates the bf16 noise floor and is tracked separately)
 
 Scope decisions
 ---------------
@@ -131,6 +136,22 @@ CASES = [
         dtype="bfloat16",
         config_overrides={"_experts_implementation": "eager"},
     ),
+    # ── DeepSeek-V3 (MLA + MoE) ──────────────────────────────────────────
+    # HF v5 builds the fused ``gate_up_proj [E, 2*I, H]`` directly via
+    # ``DeepseekV3NaiveMoe`` (no ``_experts_implementation`` knob — the
+    # ``naive`` path is hard-wired). VeOmni's ``PatchedDeepseekV3NaiveMoe``
+    # dispatches on the ``moe_experts`` OpSlot — eager loop here because
+    # the test runs without fused-kernel bindings.
+    #
+    # eager+fp32 only: deepseek_v3 ships MLA (multi-head latent attention)
+    # with split q_a / q_b / kv_a / kv_b projections, and the patchgen-
+    # generated SDPA path doesn't currently reach bitwise parity with HF's
+    # MLA SDPA reshape on the toy config (logit drift dominates the bf16
+    # noise floor — tracked separately). The eager+fp32 case is sufficient
+    # to validate the patchgen modeling: it covers the MoE expert dispatch,
+    # the OpSlot-guarded cross-entropy, and the v5 ``gate_up_proj`` layout
+    # end-to-end.
+    Case("deepseek_v3-eager", _toy("deepseek_v3_toy"), "DeepseekV3ForCausalLM", "causal_lm"),
     # ── GLM-MoE-DSA (MLA + Dynamic Sparse Attention) ─────────────────────
     # Upstream sets ``_supports_flash_attn = False``, so FA2 is not an
     # option here — we use eager+fp32 as the RNG-init baseline and
@@ -550,6 +571,16 @@ _LOADER_CASES = [
         dtype="bfloat16",
         config_overrides={"_experts_implementation": "eager"},
     ),
+    # deepseek_v3 is the only v5 MoE we ship that emits a *per-expert*
+    # safetensors layout from ``save_pretrained`` (via the ``qwen2_moe``
+    # weight-conversion mapping). The loader path therefore actually fires
+    # ``DeepseekV3CheckpointTensorConverter`` here, merging per-expert
+    # tensors back into VeOmni's fused ``gate_up_proj``/``down_proj``
+    # layout. Bitwise-equal logits prove the converter's per-expert →
+    # stack-and-fuse merge yields the same parameters HF builds in-memory.
+    # Eager+fp32 only — see the ``deepseek_v3-eager`` entry in CASES for
+    # why fa2/sdpa diverge on MLA today.
+    Case("deepseek_v3-eager-loader", _toy("deepseek_v3_toy"), "DeepseekV3ForCausalLM", "causal_lm"),
     Case(
         "glm_moe_dsa-eager-loader",
         _toy("glm_moe_dsa_toy"),
