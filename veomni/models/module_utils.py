@@ -779,9 +779,20 @@ def post_process_after_weight_loading(
         for name in sorted(parameter_names_left):
             _init_parameter(model, name)
 
-    # we should tie embeddings after loading weights because to_empty() leads to untied weights,
-    # except in the FSDP2 (swap tensor) context.
-    if getattr(model.config, "tie_word_embeddings", True):
+    # to_empty() leaves embeddings untied (except under FSDP2 swap-tensor);
+    # re-tie only when the config asks for it. Nested multimodal layouts can
+    # disable tying on either side (InternVL on inner, Qwen3VLMoe on outer with
+    # inner silent), so AND both. Treat unset as True so a silent side does not
+    # override an explicit True, but require at least one side to set the flag
+    # -- if neither does, default to False (matches HF v5).
+    text_config = (
+        model.config.get_text_config(decoder=True) if hasattr(model.config, "get_text_config") else model.config
+    )
+    if (
+        (hasattr(model.config, "tie_word_embeddings") or hasattr(text_config, "tie_word_embeddings"))
+        and getattr(model.config, "tie_word_embeddings", True)
+        and getattr(text_config, "tie_word_embeddings", True)
+    ):
         try:
             input_embeddings = model.get_input_embeddings()
             output_embeddings = model.get_output_embeddings()
