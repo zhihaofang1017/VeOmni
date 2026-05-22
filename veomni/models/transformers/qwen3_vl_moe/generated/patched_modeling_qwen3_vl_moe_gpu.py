@@ -107,8 +107,10 @@ from veomni.ops import fused_moe_forward
 from veomni.ops.dispatch import OpSlot
 from veomni.utils.constants import IMAGE_INPUT_INDEX, VIDEO_INPUT_INDEX
 from veomni.utils.device import IS_NPU_AVAILABLE
-from veomni.utils.model_outputs import (
-    Qwen3VLCausalLMOutputWithLogProbs,  # noqa: F401  surfaced for forward log_probs path
+from veomni.utils.model_outputs import (  # noqa: F401  surfaced for forward log_probs path
+    FusedLinearAuxOutput,
+    FusedLinearAuxOutputMixin,
+    Qwen3VLCausalLMOutputWithLogProbs,
     Qwen3VLMoeCausalLMOutputWithLogProbs,
 )
 
@@ -2297,23 +2299,28 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLMoePreTrainedModel, GenerationMi
         logits = None
         log_probs = None
         entropy = None
+        distillation_losses = None
+        student_mass = None
+        teacher_mass = None
         if labels is not None:
             # Modification: OpSlot guard for cross-entropy loss.
             if veomni_causal_lm_loss.use_non_eager_impl:
-                loss, logits, log_probs, entropy = veomni_causal_lm_loss(
-                    logits=logits,
-                    labels=labels,
-                    vocab_size=self.config.text_config.vocab_size,
-                    hidden_states=hidden_states,
-                    weights=self.lm_head.weight,
-                    **kwargs,
+                loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass = (
+                    veomni_causal_lm_loss(
+                        logits=logits,
+                        labels=labels,
+                        vocab_size=self.config.text_config.vocab_size,
+                        hidden_states=hidden_states,
+                        weights=self.lm_head.weight,
+                        **kwargs,
+                    )
                 )
             else:
                 logits = self.lm_head(hidden_states)
                 # Modification: VeOmni's patched `loss_function` (via LOSS_MAPPING)
-                # returns (loss, logits, log_probs, entropy); unpack to match the
+                # returns (loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass); unpack to match the
                 # OpSlot branch above.
-                loss, logits, log_probs, entropy = self.loss_function(
+                loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass = self.loss_function(
                     logits=logits,
                     labels=labels,
                     vocab_size=self.config.text_config.vocab_size,
@@ -2356,8 +2363,13 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLMoePreTrainedModel, GenerationMi
             attentions=outputs.attentions,
             rope_deltas=outputs.rope_deltas,
             router_logits=getattr(outputs, "router_logits", None),
-            log_probs=log_probs,
-            entropy=entropy,
+            fused_linear_aux=FusedLinearAuxOutput.from_loss_slots(
+                log_probs=log_probs,
+                entropy=entropy,
+                distillation_losses=distillation_losses,
+                student_mass=student_mass,
+                teacher_mass=teacher_mass,
+            ),
         )
 
     def prepare_inputs_for_generation(

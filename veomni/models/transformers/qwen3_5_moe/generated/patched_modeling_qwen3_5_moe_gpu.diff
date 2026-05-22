@@ -151,7 +151,7 @@
 +from veomni.distributed.sequence_parallel.ulysses import gather_heads_scatter_seq, gather_seq_scatter_heads
 +from veomni.utils.constants import IMAGE_INPUT_INDEX, VIDEO_INPUT_INDEX
 +from veomni.utils.device import get_device_id
-+from veomni.utils.model_outputs import MoeCausalLMOutputWithLogProbs
++from veomni.utils.model_outputs import FusedLinearAuxOutput, FusedLinearAuxOutputMixin, MoeCausalLMOutputWithLogProbs
 +from veomni.utils.moe_router_replay import get_active_replay, maybe_replay_indices
 +
 +
@@ -1133,7 +1133,7 @@
 
 
  @dataclass
-@@ -1420,6 +1945,39 @@
+@@ -1420,6 +1945,36 @@
      rope_deltas: torch.LongTensor | None = None
      router_logits: tuple[torch.FloatTensor] | None = None
      aux_loss: torch.FloatTensor | None = None
@@ -1148,7 +1148,7 @@
 +# ``forward`` can return per-token log-probs while preserving ``rope_deltas``.
 +# See qwen3_5_gpu_patch_gen_config.py for why @auto_docstring is skipped.
 +@dataclass
-+class Qwen3_5MoeCausalLMOutputWithLogProbs(Qwen3_5MoeCausalLMOutputWithPast):
++class Qwen3_5MoeCausalLMOutputWithLogProbs(FusedLinearAuxOutputMixin, Qwen3_5MoeCausalLMOutputWithPast):
 +    r"""
 +    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
 +        Language modeling loss (for next-token prediction).
@@ -1162,9 +1162,6 @@
 +        Per-token softmax entropy returned by VeOmni's fused loss path.
 +    """
 +
-+    log_probs: torch.FloatTensor | None = None
-+    entropy: torch.FloatTensor | None = None
-+
 +
 +# ======================================================================
 +# [MODIFIED CLASS] Qwen3_5MoeTextModel
@@ -1173,7 +1170,7 @@
 
 
  class Qwen3_5MoeTextModel(Qwen3_5MoePreTrainedModel):
-@@ -1512,15 +2070,40 @@
+@@ -1512,15 +2067,40 @@
 
      def _update_linear_attn_mask(self, attention_mask, cache_position):
          """
@@ -1222,7 +1219,7 @@
 
 
  @auto_docstring
-@@ -1532,7 +2115,19 @@
+@@ -1532,7 +2112,19 @@
      config: Qwen3_5MoeConfig
      _no_split_modules = ["Qwen3_5MoeTextDecoderLayer", "Qwen3_5MoeVisionBlock"]
 
@@ -1242,7 +1239,7 @@
          super().__init__(config)
          self.visual = Qwen3_5MoeVisionModel._from_config(config.vision_config)
          self.language_model = Qwen3_5MoeTextModel._from_config(config.text_config)
-@@ -1659,64 +2254,44 @@
+@@ -1659,64 +2251,44 @@
          self,
          pixel_values: torch.FloatTensor,
          image_grid_thw: torch.LongTensor | None = None,
@@ -1333,7 +1330,7 @@
          return special_image_mask, special_video_mask
 
      def compute_3d_position_ids(
-@@ -1769,6 +2344,7 @@
+@@ -1769,6 +2341,7 @@
          pixel_values_videos: torch.FloatTensor | None = None,
          image_grid_thw: torch.LongTensor | None = None,
          video_grid_thw: torch.LongTensor | None = None,
@@ -1341,7 +1338,7 @@
          cache_position: torch.LongTensor | None = None,
          **kwargs: Unpack[TransformersKwargs],
      ) -> tuple | Qwen3_5MoeModelOutputWithPast:
-@@ -1777,6 +2353,8 @@
+@@ -1777,6 +2350,8 @@
              The temporal, height and width of feature shape of each image in LLM.
          video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
              The temporal, height and width of feature shape of each video in LLM.
@@ -1350,7 +1347,7 @@
          """
          if (input_ids is None) ^ (inputs_embeds is not None):
              raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-@@ -1784,27 +2362,150 @@
+@@ -1784,27 +2359,150 @@
          if inputs_embeds is None:
              inputs_embeds = self.get_input_embeddings()(input_ids)
 
@@ -1511,7 +1508,7 @@
 
          if position_ids is None:
              position_ids = self.compute_3d_position_ids(
-@@ -1815,6 +2516,17 @@
+@@ -1815,6 +2513,17 @@
                  attention_mask=attention_mask,
                  past_key_values=past_key_values,
              )
@@ -1529,7 +1526,7 @@
 
          outputs = self.language_model(
              input_ids=None,
-@@ -1914,6 +2626,12 @@
+@@ -1914,6 +2623,12 @@
      return overall_loss * num_experts
 
 
@@ -1542,7 +1539,7 @@
  @auto_docstring
  class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, GenerationMixin):
      _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
-@@ -1934,6 +2652,7 @@
+@@ -1934,6 +2649,7 @@
          # Initialize weights and apply final processing
          self.post_init()
 
@@ -1550,7 +1547,7 @@
      @can_return_tuple
      @auto_docstring
      def forward(
-@@ -1949,7 +2668,7 @@
+@@ -1949,7 +2665,7 @@
          cache_position: torch.LongTensor | None = None,
          logits_to_keep: int | torch.Tensor = 0,
          **kwargs: Unpack[TransformersKwargs],
@@ -1559,7 +1556,7 @@
          r"""
          labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
              Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-@@ -1993,24 +2712,60 @@
+@@ -1993,24 +2709,65 @@
          hidden_states = outputs.last_hidden_state
          # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
          slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
@@ -1570,24 +1567,29 @@
 +        logits = None
 +        log_probs = None
 +        entropy = None
++        distillation_losses = None
++        student_mass = None
++        teacher_mass = None
          if labels is not None:
 -            loss = self.loss_function(logits, labels, self.vocab_size, **kwargs)
 +            # Modification: OpSlot guard for cross-entropy loss.
 +            if veomni_causal_lm_loss.use_non_eager_impl:
-+                loss, logits, log_probs, entropy = veomni_causal_lm_loss(
-+                    logits=logits,
-+                    labels=labels,
-+                    vocab_size=self.config.vocab_size,
-+                    hidden_states=hidden_states,
-+                    weights=self.lm_head.weight,
-+                    **kwargs,
++                loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass = (
++                    veomni_causal_lm_loss(
++                        logits=logits,
++                        labels=labels,
++                        vocab_size=self.config.vocab_size,
++                        hidden_states=hidden_states,
++                        weights=self.lm_head.weight,
++                        **kwargs,
++                    )
 +                )
 +            else:
 +                logits = self.lm_head(hidden_states)
 +                # Modification: VeOmni's patched `loss_function` (via LOSS_MAPPING)
-+                # returns (loss, logits, log_probs, entropy); unpack to match the
++                # returns (loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass); unpack to match the
 +                # OpSlot branch above.
-+                loss, logits, log_probs, entropy = self.loss_function(
++                loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass = self.loss_function(
 +                    logits=logits,
 +                    labels=labels,
 +                    vocab_size=self.config.vocab_size,
@@ -1632,13 +1634,18 @@
              loss=loss,
              aux_loss=aux_loss,
              logits=logits,
-@@ -2018,7 +2773,15 @@
+@@ -2018,7 +2775,20 @@
              hidden_states=outputs.hidden_states,
              attentions=outputs.attentions,
              router_logits=outputs.router_logits,
 -        )
-+            log_probs=log_probs,
-+            entropy=entropy,
++            fused_linear_aux=FusedLinearAuxOutput.from_loss_slots(
++                log_probs=log_probs,
++                entropy=entropy,
++                distillation_losses=distillation_losses,
++                student_mass=student_mass,
++                teacher_mass=teacher_mass,
++            ),
 +        )
 +
 +
@@ -1649,7 +1656,7 @@
 
 
  class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoePreTrainedModel, GenerationMixin):
-@@ -2073,6 +2836,7 @@
+@@ -2073,6 +2843,7 @@
          """
          return self.model.get_image_features(pixel_values=pixel_values, image_grid_thw=image_grid_thw, **kwargs)
 
@@ -1657,7 +1664,7 @@
      @can_return_tuple
      def forward(
          self,
-@@ -2089,58 +2853,7 @@
+@@ -2089,58 +2860,7 @@
          cache_position: torch.LongTensor | None = None,
          logits_to_keep: int | torch.Tensor = 0,
          **kwargs: Unpack[TransformersKwargs],
@@ -1717,7 +1724,7 @@
          outputs = self.model(
              input_ids=input_ids,
              pixel_values=pixel_values,
-@@ -2156,37 +2869,72 @@
+@@ -2156,37 +2876,82 @@
          )
 
          hidden_states = outputs[0]
@@ -1731,24 +1738,29 @@
 +        logits = None
 +        log_probs = None
 +        entropy = None
++        distillation_losses = None
++        student_mass = None
++        teacher_mass = None
          if labels is not None:
 -            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size)
 +            # Modification: OpSlot guard for cross-entropy loss.
 +            if veomni_causal_lm_loss.use_non_eager_impl:
-+                loss, logits, log_probs, entropy = veomni_causal_lm_loss(
-+                    logits=logits,
-+                    labels=labels,
-+                    vocab_size=self.config.text_config.vocab_size,
-+                    hidden_states=hidden_states,
-+                    weights=self.lm_head.weight,
-+                    **kwargs,
++                loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass = (
++                    veomni_causal_lm_loss(
++                        logits=logits,
++                        labels=labels,
++                        vocab_size=self.config.text_config.vocab_size,
++                        hidden_states=hidden_states,
++                        weights=self.lm_head.weight,
++                        **kwargs,
++                    )
 +                )
 +            else:
 +                logits = self.lm_head(hidden_states)
 +                # Modification: VeOmni's patched `loss_function` (via LOSS_MAPPING)
-+                # returns (loss, logits, log_probs, entropy); unpack to match the
++                # returns (loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass); unpack to match the
 +                # OpSlot branch above.
-+                loss, logits, log_probs, entropy = self.loss_function(
++                loss, logits, log_probs, entropy, distillation_losses, student_mass, teacher_mass = self.loss_function(
 +                    logits=logits,
 +                    labels=labels,
 +                    vocab_size=self.config.text_config.vocab_size,
@@ -1800,12 +1812,17 @@
 +            router_logits=outputs.router_logits,
              rope_deltas=outputs.rope_deltas,
 -            router_logits=outputs.router_logits,
-+            log_probs=log_probs,
-+            entropy=entropy,
++            fused_linear_aux=FusedLinearAuxOutput.from_loss_slots(
++                log_probs=log_probs,
++                entropy=entropy,
++                distillation_losses=distillation_losses,
++                student_mass=student_mass,
++                teacher_mass=teacher_mass,
++            ),
          )
 
      def prepare_inputs_for_generation(
-@@ -2413,6 +3161,25 @@
+@@ -2413,6 +3178,25 @@
 
          return input_ids, model_kwargs
 
