@@ -75,7 +75,11 @@ class CheckpointerCallback(Callback):
         if getattr(self.trainer.checkpointer, "save_future", None) is not None:  # async save
             self.trainer.checkpointer.save_future.result()
 
-        self.trainer.checkpointer.load(args.train.checkpoint.load_path, state)
+        self.trainer.checkpointer.load(
+            args.train.checkpoint.load_path,
+            state,
+            trainable_only=bool(getattr(args.model, "lora_config", None)),
+        )
 
         self.trainer.state.global_step = state["extra_state"]["global_step"]
         self.trainer.start_epoch = self.trainer.state.global_step // args.train_steps
@@ -118,7 +122,13 @@ class CheckpointerCallback(Callback):
                 "torch_rng_state": torch.get_rng_state(),
             },
         }
-        self.trainer.checkpointer.save(save_checkpoint_path, ckpt_state, save_async=args.train.checkpoint.save_async)
+
+        self.trainer.checkpointer.save(
+            save_checkpoint_path,
+            ckpt_state,
+            save_async=args.train.checkpoint.save_async,
+            trainable_only=bool(getattr(args.model, "lora_config", None)),
+        )
 
         # Empty cache and barrier
         helper.empty_cache()
