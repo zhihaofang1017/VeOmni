@@ -123,6 +123,15 @@ class CheckpointerCallback(Callback):
             },
         }
 
+        # Free the training step's residual activations / autograd buffers
+        # before DCP allocates NCCL collective buffers for the gather.
+        # Mirrors the existing post-save ``empty_cache()`` below; without
+        # this pre-save call the save can fight the training step for HBM
+        # (observed as ``NCCL WARN Cuda failure 2 'out of memory'`` inside
+        # dcp.save on Qwen3.5-35B-a3b VL h100x16). Cost: one ``cudaFree``
+        # per ``save_steps``, well below noise.
+        helper.empty_cache()
+
         self.trainer.checkpointer.save(
             save_checkpoint_path,
             ckpt_state,

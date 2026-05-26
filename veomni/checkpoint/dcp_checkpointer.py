@@ -254,7 +254,17 @@ class OptimizerState(Stateful):
                     if val.ndim == 0:
                         placeholder[key] = torch.zeros_like(val)
                     else:
-                        placeholder[key] = torch.zeros_like(param.data, dtype=val.dtype, device=val.device)
+                        # Placeholder zeros: DCP writes them straight to disk, so
+                        # the backing device doesn't matter — keep them on CPU to
+                        # avoid HBM pressure during save. For FSDP2 params,
+                        # ``param.data`` is itself a DTensor; ``zeros_like``
+                        # propagates its placements + mesh, so the local shard
+                        # ends up the correct per-rank shape on CPU.
+                        placeholder[key] = torch.zeros_like(
+                            param.data,
+                            dtype=val.dtype,
+                            device="cpu",
+                        )
                 elif isinstance(val, (int, float)):
                     placeholder[key] = type(val)(0)
                 else:
