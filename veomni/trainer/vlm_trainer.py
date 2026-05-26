@@ -27,7 +27,7 @@ from ..utils import helper
 from ..utils.device import synchronize
 from ..utils.loss_utils import count_loss_token
 from ..utils.model_utils import pretty_print_trainable_parameters
-from .base import BaseTrainer, _collect_muon_kwargs
+from .base import BackgroundPrefetcher, BaseTrainer, _collect_muon_kwargs
 
 
 logger = helper.create_logger(__name__)
@@ -332,7 +332,12 @@ class VLMTrainer:
             self.on_epoch_begin()
 
             # Create a batch generator
-            data_iterator = iter(self.base.train_dataloader)
+            if args.data.dataloader.use_background_prefetcher:
+                data_iterator = BackgroundPrefetcher(self.base.train_dataloader)
+            else:
+                data_iterator = iter(self.base.train_dataloader)
+
+            self.base.data_iterator = data_iterator
 
             for _ in range(self.base.start_step, args.train_steps):
                 try:
@@ -345,8 +350,13 @@ class VLMTrainer:
 
             self.base.start_step = 0
             helper.print_device_mem_info(f"VRAM usage after epoch {epoch + 1}")
+            if isinstance(data_iterator, BackgroundPrefetcher):
+                data_iterator.stop()
 
         self.on_train_end()
+
+        if isinstance(data_iterator, BackgroundPrefetcher):
+            data_iterator.stop()
 
         synchronize()
 
