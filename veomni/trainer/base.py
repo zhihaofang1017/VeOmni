@@ -162,6 +162,37 @@ class BackgroundPrefetcher:
                 logger.warning("BackgroundPrefetcher worker thread did not terminate within timeout.")
 
 
+class VeOmniIter:
+    """
+    A unified iterator wrapper that handles both standard iteration and background prefetching.
+    """
+
+    def __init__(self, dataloader, use_background_prefetcher: bool = False, maxsize: int = 1):
+        self.dataloader = dataloader
+        self.use_background_prefetcher = use_background_prefetcher
+        if use_background_prefetcher:
+            self.iterator = BackgroundPrefetcher(dataloader, maxsize=maxsize)
+        else:
+            self.iterator = iter(dataloader)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self.iterator)
+
+    def stop(self, timeout: float = 5.0):
+        if self.use_background_prefetcher and hasattr(self.iterator, "stop"):
+            self.iterator.stop(timeout=timeout)
+
+    def state_dict(self):
+        if self.use_background_prefetcher and hasattr(self.iterator, "state_dict"):
+            return self.iterator.state_dict()
+        if hasattr(self.dataloader, "state_dict"):
+            return self.dataloader.state_dict()
+        return {}
+
+
 def _collect_muon_kwargs(optimizer_cfg) -> Dict[str, Any]:
     """Pull Muon-specific hyperparameters out of ``OptimizerConfig``."""
     return {
@@ -733,14 +764,13 @@ class BaseTrainer(Stateful, ABC):
             self.on_epoch_begin()
 
             # Create a batch generator
-            if args.data.dataloader.use_background_prefetcher:
-                data_iterator = BackgroundPrefetcher(self.train_dataloader)
-            else:
-                data_iterator = iter(self.train_dataloader)
+            self.data_iterator = VeOmniIter(
+                self.train_dataloader, use_background_prefetcher=args.data.dataloader.use_background_prefetcher
+            )
 
             for _ in range(self.start_step, args.train_steps):
                 try:
-                    self.train_step(data_iterator)
+                    self.train_step(self.data_iterator)
                 except StopIteration:
                     logger.info(f"epoch:{epoch} Dataloader finished with drop_last {args.data.dataloader.drop_last}")
                     break
@@ -751,13 +781,13 @@ class BaseTrainer(Stateful, ABC):
 
             helper.print_device_mem_info(f"VRAM usage after epoch {epoch + 1}")
 
-            if isinstance(data_iterator, BackgroundPrefetcher):
-                data_iterator.stop()
+            if args.data.dataloader.use_background_prefetcher:
+                self.data_iterator.stop()
 
         self.on_train_end()
 
-        if "data_iterator" in locals() and isinstance(data_iterator, BackgroundPrefetcher):
-            data_iterator.stop()
+        if "data_iterator" in locals() and args.data.dataloader.use_background_prefetcher:
+            self.data_iterator.stop()
 
         synchronize()
 
