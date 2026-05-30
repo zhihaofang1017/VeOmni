@@ -3,6 +3,7 @@ name: Check Patchgen Drift
 on:
   pull_request:
     paths:
+      - "patchgen-pkg/**"
       - "veomni/patchgen/**"
       - "veomni/models/transformers/**"
       - "pyproject.toml"
@@ -11,6 +12,7 @@ on:
     branches:
       - main
     paths:
+      - "patchgen-pkg/**"
       - "veomni/patchgen/**"
       - "veomni/models/transformers/**"
       - "pyproject.toml"
@@ -40,4 +42,4 @@ jobs:
           version: "0.11.16"
 
       - name: Check patchgen drift
-        run: uv run --extra gpu --dev python -m veomni.patchgen.check_patchgen
+        run: uv run --extra gpu --dev patchgen --check
