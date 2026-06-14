@@ -54,6 +54,23 @@ def wan_eager_attention_forward(
     return attn_output.transpose(1, 2), None
 
 
+class WanAttentionKernelModule:
+    def __init__(self, config: SimpleNamespace, attn: WanAttention):
+        target_dtype = attn.to_q.weight.dtype
+        if target_dtype == torch.float32:
+            target_dtype = torch.bfloat16
+        self.config = SimpleNamespace(
+            _attn_implementation=config._attn_implementation,
+            _pre_quantization_dtype=target_dtype,
+        )
+        self.is_causal = False
+        self.layer_idx = getattr(attn, "layer_idx", None)
+        self._attn = attn
+
+    def modules(self):
+        return self._attn.modules()
+
+
 class WanSPAttnProcessor(WanAttnProcessor):
     def __init__(self, attn_implementation: str):
         self.attn_implementation = attn_implementation
@@ -113,8 +130,13 @@ class WanSPAttnProcessor(WanAttnProcessor):
         # Route to the right attention kernel via ALL_ATTENTION_FUNCTIONS.
         # SP has already been handled above, so skip it inside the kernel.
         attention_interface: Callable = wan_eager_attention_forward
-        if self.attn_implementation != "eager":
+        use_fp32_attention = query.dtype == torch.float32 and attn.to_q.weight.dtype == torch.float32
+        if self.attn_implementation != "eager" and not use_fp32_attention:
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.attn_implementation]
+        elif self.attn_implementation != "eager":
+            logger.warning_once("Wan attention is running in fp32, so using eager SDPA instead of flash-attention.")
+
+        kernel_module = WanAttentionKernelModule(self.config, attn)
 
         # I2V: additional cross-attention over image tokens (no Ulysses SP needed).
         hidden_states_img = None
@@ -125,7 +147,7 @@ class WanSPAttnProcessor(WanAttnProcessor):
             key_img = key_img.unflatten(2, (attn.heads, -1))
             value_img = value_img.unflatten(2, (attn.heads, -1))
             hidden_states_img = attention_interface(
-                self,
+                kernel_module,
                 query.transpose(1, 2),
                 key_img.transpose(1, 2),
                 value_img.transpose(1, 2),
@@ -137,7 +159,7 @@ class WanSPAttnProcessor(WanAttnProcessor):
             hidden_states_img = hidden_states_img.flatten(2, 3).type_as(query)
 
         hidden_states_out = attention_interface(
-            self,
+            kernel_module,
             query.transpose(1, 2),
             key.transpose(1, 2),
             value.transpose(1, 2),
@@ -159,6 +181,7 @@ class WanSPAttnProcessor(WanAttnProcessor):
         if hidden_states_img is not None:
             hidden_states_out = hidden_states_out + hidden_states_img
 
+        hidden_states_out = hidden_states_out.type_as(attn.to_out[0].weight)
         hidden_states_out = attn.to_out[0](hidden_states_out)
         hidden_states_out = attn.to_out[1](hidden_states_out)
         return hidden_states_out
