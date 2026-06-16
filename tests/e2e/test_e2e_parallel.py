@@ -43,6 +43,7 @@ def _materialize_weights_dir(config_path: str, output_path: str, save_original_f
         init_device="cpu",
         ops_implementation=make_eager_ops_config(),
     )
+
     model.save_pretrained(output_path, save_original_format=save_original_format)
 
 
@@ -411,6 +412,29 @@ def test_qwen3omni_parallel_align(
         atol=atol,
         train_path=dummy_qwen3omni_dataset,
     )
+
+
+def test_wan_dit_uses_bfloat16_and_flash_attention():
+    command_list = prepare_exec_cmd(
+        ["train_dit_test"],
+        "wan_t2v",
+        "./tests/toy_config/wan_t2v_toy",
+        model_path="./wan_t2v",
+        train_path="./dummy_wan_t2v",
+        output_dir="./wan_t2v",
+        is_moe=False,
+        max_sp_size=1,
+    )
+
+    assert command_list
+    for _, cmd_kwargs in command_list:
+        cmd = build_torchrun_cmd(**cmd_kwargs)
+        assert cmd_kwargs["extra_args"] == [
+            "--train.accelerator.fsdp_config.mixed_precision.enable=True",
+            "--train.accelerator.fsdp_config.mixed_precision.param_dtype=bfloat16",
+            "--train.accelerator.fsdp_config.mixed_precision.cast_forward_inputs=True",
+        ]
+        assert "--model.ops_implementation.attn_implementation=flash_attention_2" in cmd
 
 
 @pytest.mark.parametrize("model_name, config_path, is_moe, rtol, atol", wan_dit_test_cases)
