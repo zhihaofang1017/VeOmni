@@ -171,7 +171,7 @@ class QuackFusedMoeExpertFunction(torch.autograd.Function):
         # Pass .T view (not .T.contiguous()) — quack varlen_k requires A to be m-major.
         grad_fc2_weight = None
         if fc2_weight.requires_grad:
-            grad_fc2_weight = gemm(grad_fc2_output.T, fc1_weighted_output, cu_seqlens_k=cu_seqlens_m)
+            grad_fc2_weight = gemm(grad_fc2_output.T, fc1_weighted_output, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del fc1_weighted_output
 
         # Step 8-2: routing weight backward
@@ -215,13 +215,13 @@ class QuackFusedMoeExpertFunction(torch.autograd.Function):
         # Step 6 wgrad: grad_fc1_2_output.T @ scatter_output → [E, I, H]
         grad_fc1_2_weight = None
         if fc1_2_weight.requires_grad:
-            grad_fc1_2_weight = gemm(grad_fc1_2_output.T, scatter_output, cu_seqlens_k=cu_seqlens_m)
+            grad_fc1_2_weight = gemm(grad_fc1_2_output.T, scatter_output, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del grad_fc1_2_output
 
         # Step 4 wgrad: grad_fc1_1_output.T @ scatter_output → [E, I, H]
         grad_fc1_1_weight = None
         if fc1_1_weight.requires_grad:
-            grad_fc1_1_weight = gemm(grad_fc1_1_output.T, scatter_output, cu_seqlens_k=cu_seqlens_m)
+            grad_fc1_1_weight = gemm(grad_fc1_1_output.T, scatter_output, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del grad_fc1_1_output, scatter_output
 
         # Step 3: gather gradients back to original token order
@@ -343,7 +343,7 @@ class MergedFc1QuackFusedMoeExpertFunction(torch.autograd.Function):
         # Pass .T view (not .T.contiguous()) — quack varlen_k requires A to be m-major.
         grad_fc2_weight = None
         if fc2_weight.requires_grad:
-            grad_fc2_weight = gemm(grad_fc2_output.T, fc1_weighted_output, cu_seqlens_k=cu_seqlens_m)
+            grad_fc2_weight = gemm(grad_fc2_output.T, fc1_weighted_output, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del fc1_weighted_output
 
         # Step 8-2
@@ -385,7 +385,7 @@ class MergedFc1QuackFusedMoeExpertFunction(torch.autograd.Function):
         grad_fc1_1_2_weight = None
         if fc1_1_2_weight.requires_grad:
             scatter_output = moe_scatter(hidden_states, scatter_index)
-            grad_fc1_1_2_weight = gemm(grad_fc1_output.T, scatter_output, cu_seqlens_k=cu_seqlens_m)
+            grad_fc1_1_2_weight = gemm(grad_fc1_output.T, scatter_output, cu_seqlens_k=cu_seqlens_m, tuned=False)
             del scatter_output
         del grad_fc1_output
 
@@ -484,7 +484,7 @@ class EPQuackGroupGemm(torch.autograd.Function):
         # wgrad fc2
         grad_fc2_weight = None
         if fc2_weight.requires_grad:
-            grad_fc2_weight = gemm(grad_output.T, fc1_result, cu_seqlens_k=cu_seqlens_m)
+            grad_fc2_weight = gemm(grad_output.T, fc1_result, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del fc1_result
 
         # gate gradients
@@ -501,7 +501,7 @@ class EPQuackGroupGemm(torch.autograd.Function):
         # wgrad fc1_2
         grad_fc1_2_weight = None
         if fc1_2_weight.requires_grad:
-            grad_fc1_2_weight = gemm(grad_fc1_2_output.T, permute_tokens, cu_seqlens_k=cu_seqlens_m)
+            grad_fc1_2_weight = gemm(grad_fc1_2_output.T, permute_tokens, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del grad_fc1_2_output
 
         # silu backward
@@ -515,7 +515,7 @@ class EPQuackGroupGemm(torch.autograd.Function):
         # wgrad fc1_1
         grad_fc1_1_weight = None
         if fc1_1_weight.requires_grad:
-            grad_fc1_1_weight = gemm(grad_fc1_1_output.T, permute_tokens, cu_seqlens_k=cu_seqlens_m)
+            grad_fc1_1_weight = gemm(grad_fc1_1_output.T, permute_tokens, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del grad_fc1_1_output
 
         grad_permute_tokens = grad_scatter_output_1 + grad_scatter_output_2
@@ -607,7 +607,7 @@ class EPMergedFc1QuackGroupGemm(torch.autograd.Function):
         # wgrad fc2
         grad_fc2_weight = None
         if fc2_weight.requires_grad:
-            grad_fc2_weight = gemm(grad_output.T, fc1_result, cu_seqlens_k=cu_seqlens_m)
+            grad_fc2_weight = gemm(grad_output.T, fc1_result, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del fc1_result
 
         # gate gradients
@@ -632,7 +632,7 @@ class EPMergedFc1QuackGroupGemm(torch.autograd.Function):
         # single wgrad for merged fc1
         grad_fc1_1_2_weight = None
         if fc1_1_2_weight.requires_grad:
-            grad_fc1_1_2_weight = gemm(grad_fc1_output.T, permute_tokens, cu_seqlens_k=cu_seqlens_m)
+            grad_fc1_1_2_weight = gemm(grad_fc1_output.T, permute_tokens, cu_seqlens_k=cu_seqlens_m, tuned=False)
         del grad_fc1_output
 
         return (
