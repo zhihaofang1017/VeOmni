@@ -32,7 +32,7 @@ import queue
 import threading
 from abc import ABC
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from typing import Any, Callable, Dict, List
 
 import torch
@@ -58,6 +58,7 @@ from ..data.data_transform import build_data_transform
 from ..distributed.clip_grad_norm import veomni_clip_grad_norm
 from ..distributed.offloading import build_activation_offloading_context
 from ..distributed.parallel_state import init_parallel_state
+from ..distributed.torch_compile import CompileConfig, mark_compile_step_begin
 from ..distributed.torch_parallelize import build_parallelize_model
 from ..models import build_foundation_model, build_tokenizer
 from ..ops.batch_invariant_ops import set_batch_invariant_mode
@@ -520,6 +521,9 @@ class BaseTrainer(Stateful, ABC):
             ep_sharded_stream_load=args.train.ep_sharded_stream_load,
             max_load_broadcast_size=args.train.accelerator.fsdp_config.max_load_broadcast_size,
             muon_expert_zero_comm=muon_expert_zero_comm,
+            compile_config=CompileConfig(
+                **{field.name: getattr(args.train.torch_compile, field.name) for field in fields(CompileConfig)}
+            ),
             **kwargs,
         )
         self.model.train()
@@ -730,6 +734,7 @@ class BaseTrainer(Stateful, ABC):
         num_micro_steps = len(micro_batches)
         # forward and backward pass with gradient_accumulationsteps
         for micro_step, micro_batch in enumerate(micro_batches):
+            mark_compile_step_begin(getattr(self.model, "_veomni_compile_uses_cuda_graphs", False))
             self.model_reshard(micro_step, num_micro_steps)
             self._configure_hsdp_allreduce(micro_step, num_micro_steps)
             loss: torch.Tensor

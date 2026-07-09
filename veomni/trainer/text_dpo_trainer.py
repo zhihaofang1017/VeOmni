@@ -27,6 +27,7 @@ from ..data.data_collator import PostCollator
 from ..distributed.clip_grad_norm import veomni_clip_grad_norm
 from ..distributed.parallel_state import get_parallel_state
 from ..distributed.sequence_parallel import gather_outputs
+from ..distributed.torch_compile import mark_compile_step_begin
 from ..distributed.torch_parallelize import build_parallelize_model
 from ..models import build_foundation_model, build_tokenizer
 from ..ops.batch_invariant_ops import set_batch_invariant_mode
@@ -386,6 +387,7 @@ class TextDPOTrainer:
 
         num_micro_steps = len(micro_batches)
         for micro_step, micro_batch in enumerate(micro_batches):
+            mark_compile_step_begin(getattr(self.base.model, "_veomni_compile_uses_cuda_graphs", False))
             self.base.model_reshard(micro_step, num_micro_steps)
             loss, loss_dict = self.forward_backward_step(micro_batch)
 

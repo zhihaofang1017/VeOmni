@@ -450,6 +450,38 @@ class CheckpointConfig:
 
 
 @dataclass
+class TorchCompileConfig:
+    """train.torch_compile.* — Per-block torch.compile options."""
+
+    enable: bool = field(
+        default=False,
+        metadata={"help": "Enable per-block torch.compile for FSDP2 text training."},
+    )
+    backend: Optional[str] = field(
+        default="inductor",
+        metadata={"help": "Backend passed to torch.compile."},
+    )
+    mode: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Mode passed to torch.compile. Leave as None to use the inductor default. "
+                "'reduce-overhead' enables CUDA Graphs on the inductor backend and requires "
+                "train.accelerator.fsdp_config.reshard_after_forward=False."
+            )
+        },
+    )
+    fullgraph: bool = field(
+        default=True,
+        metadata={"help": "Whether to pass fullgraph=True to torch.compile."},
+    )
+    dynamic: bool = field(
+        default=False,
+        metadata={"help": "Whether to pass dynamic=True to torch.compile."},
+    )
+
+
+@dataclass
 class TrainingArguments:
     """train.* — Top-level training configuration."""
 
@@ -554,10 +586,6 @@ class TrainingArguments:
         default=42,
         metadata={"help": "Random seed."},
     )
-    enable_compile: bool = field(
-        default=False,
-        metadata={"help": "Enable torch compile."},
-    )
     max_steps: Optional[int] = field(
         default=None,
         metadata={"help": "Max training steps per epoch. (for debug)"},
@@ -578,6 +606,7 @@ class TrainingArguments:
     wandb: WandbConfig = field(default_factory=WandbConfig)
     profile: ProfileConfig = field(default_factory=ProfileConfig)
     gradient_checkpointing: GradientCheckpointingConfig = field(default_factory=GradientCheckpointingConfig)
+    torch_compile: TorchCompileConfig = field(default_factory=TorchCompileConfig)
     accelerator: AcceleratorConfig = field(default_factory=AcceleratorConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
 
@@ -1171,6 +1200,8 @@ class DataloaderConfig:
 class DataArguments:
     """data.* — Dataset paths, tokenization, and batching."""
 
+    supports_torch_compile = True
+
     train_path: str = field(
         metadata={"help": "Local path/HDFS path of the training data. Use comma to separate multiple datasets."},
     )
@@ -1272,6 +1303,24 @@ class VeOmniArguments:
             else:
                 self.train.pad_to_length = self.train.micro_batch_size * self.data.max_seq_len
                 logger.info_rank0(f"set pad_to_length = micro_batch_size * max_seq_len = {self.train.pad_to_length}")
+
+        if self.train.torch_compile.enable:
+            if not getattr(self.data, "supports_torch_compile", True):
+                raise ValueError(
+                    "train.torch_compile.enable currently supports text trainers only. "
+                    "Multimodal/DiT/Omni data pipelines do not implement pad_to_length for static packed shapes yet."
+                )
+            if self.data.data_type not in ("plaintext", "conversation", "classification", "dpo"):
+                raise ValueError(
+                    "train.torch_compile.enable currently supports text data only; "
+                    f"got data.data_type={self.data.data_type!r}."
+                )
+            if not self.train.dyn_bsz or not self.train.pad_to_length:
+                raise ValueError(
+                    "train.torch_compile.enable requires train.dyn_bsz=True and train.pad_to_length=True. "
+                    "Variable packed lengths trigger recompilation and prevent stable CUDA Graph replay when enabled; "
+                    "see https://github.com/ByteDance-Seed/VeOmni/issues/401."
+                )
 
     def compute_train_steps(self, dataset_length: Optional[int] = None):
         if self.train.dyn_bsz:
